@@ -15,7 +15,7 @@
 #include "cadet/cadet.hpp"
 
 #include "model/parts/ConvectionDispersionOperator.hpp"
-#include "model/parts/ConvectionDispersionKernel.hpp"
+#include "model/parts/AxialConvectionDispersionKernel.hpp"
 #include "Weno.hpp"
 #include "AdUtils.hpp"
 #include "SimulationTypes.hpp"
@@ -378,7 +378,7 @@ void testBulkJacobianSparsityWeno(int wenoOrder, bool forwardFlow)
 		weno.order(wenoOrder);
 		weno.boundaryTreatment(cadet::Weno::BoundaryTreatment::ReduceOrder);
 
-		cadet::model::parts::convdisp::FlowParameters<double> fp{
+		cadet::model::parts::convdisp::AxialFlowParameters<double> fp{
 			u,
 			d_c.data(),
 			h,
@@ -395,7 +395,7 @@ void testBulkJacobianSparsityWeno(int wenoOrder, bool forwardFlow)
 
 		// Obtain sparsity pattern
 		cadet::linalg::SparsityPattern pattern(nComp * nCol, std::max(weno.lowerBandwidth() + 1u, 1u) + 1u + std::max(weno.upperBandwidth(), 1u));
-		cadet::model::parts::convdisp::sparsityPattern(pattern.row(0), nComp, nCol, strideCell, u, weno);
+		cadet::model::parts::convdisp::sparsityPatternAxial(pattern.row(0), nComp, nCol, strideCell, u, weno);
 
 		// Obtain memory for state, Jacobian columns
 		const int nDof = nComp + nComp * nCol;
@@ -412,10 +412,10 @@ void testBulkJacobianSparsityWeno(int wenoOrder, bool forwardFlow)
 
 			// Central finite differences
 			y[nComp + col] = ref * (1.0 + 1e-6);
-			cadet::model::parts::convdisp::residualKernel<double, double, double, cadet::linalg::BandedSparseRowIterator, false>(cadet::SimulationTime{0.0, 0u}, y.data(), nullptr, jacCol1.data(), cadet::linalg::BandedSparseRowIterator(), fp);
+			cadet::model::parts::convdisp::residualKernelAxial<double, double, double, cadet::linalg::BandedSparseRowIterator, false>(cadet::SimulationTime{0.0, 0u}, y.data(), nullptr, jacCol1.data(), cadet::linalg::BandedSparseRowIterator(), fp);
 
 			y[nComp + col] = ref * (1.0 - 1e-6);
-			cadet::model::parts::convdisp::residualKernel<double, double, double, cadet::linalg::BandedSparseRowIterator, false>(cadet::SimulationTime{0.0, 0u}, y.data(), nullptr, jacCol2.data(), cadet::linalg::BandedSparseRowIterator(), fp);
+			cadet::model::parts::convdisp::residualKernelAxial<double, double, double, cadet::linalg::BandedSparseRowIterator, false>(cadet::SimulationTime{0.0, 0u}, y.data(), nullptr, jacCol2.data(), cadet::linalg::BandedSparseRowIterator(), fp);
 
 			y[nComp + col] = ref;
 
@@ -452,7 +452,7 @@ void testBulkJacobianSparseBandedWeno(int wenoOrder, bool forwardFlow)
 		weno.order(wenoOrder);
 		weno.boundaryTreatment(cadet::Weno::BoundaryTreatment::ReduceOrder);
 
-		cadet::model::parts::convdisp::FlowParameters<double> fp{
+		cadet::model::parts::convdisp::AxialFlowParameters<double> fp{
 			u,
 			d_c.data(),
 			h,
@@ -471,7 +471,7 @@ void testBulkJacobianSparseBandedWeno(int wenoOrder, bool forwardFlow)
 		const unsigned int lowerBandwidth = std::max(weno.lowerBandwidth() + 1u, 1u);
 		const unsigned int upperBandwidth = std::max(weno.upperBandwidth(), 1u);
 		cadet::linalg::SparsityPattern pattern(nComp * nCol, lowerBandwidth + 1u + upperBandwidth);
-		cadet::model::parts::convdisp::sparsityPattern(pattern.row(0), nComp, nCol, strideCell, u, weno);
+		cadet::model::parts::convdisp::sparsityPatternAxial(pattern.row(0), nComp, nCol, strideCell, u, weno);
 
 		// Obtain memory for state
 		const int nDof = nComp + nComp * nCol;
@@ -483,7 +483,7 @@ void testBulkJacobianSparseBandedWeno(int wenoOrder, bool forwardFlow)
 
 		// Populate sparse matrix
 		cadet::linalg::CompressedSparseMatrix sparseMat(pattern);
-		cadet::model::parts::convdisp::residualKernel<double, double, double, cadet::linalg::BandedSparseRowIterator, true>(cadet::SimulationTime{0.0, 0u}, y.data(), nullptr, res.data(), sparseMat.row(0), fp);
+		cadet::model::parts::convdisp::residualKernelAxial<double, double, double, cadet::linalg::BandedSparseRowIterator, true>(cadet::SimulationTime{0.0, 0u}, y.data(), nullptr, res.data(), sparseMat.row(0), fp);
 
 		// Populate dense matrix
 		cadet::linalg::BandMatrix bandMat;
@@ -491,7 +491,7 @@ void testBulkJacobianSparseBandedWeno(int wenoOrder, bool forwardFlow)
 			bandMat.resize(nComp * nCol, lowerBandwidth * strideCell, upperBandwidth * strideCell);
 		else
 			bandMat.resize(nComp * nCol, upperBandwidth * strideCell, lowerBandwidth * strideCell);
-		cadet::model::parts::convdisp::residualKernel<double, double, double, cadet::linalg::BandMatrix::RowIterator, true>(cadet::SimulationTime{0.0, 0u}, y.data(), nullptr, res.data(), bandMat.row(0), fp);
+		cadet::model::parts::convdisp::residualKernelAxial<double, double, double, cadet::linalg::BandMatrix::RowIterator, true>(cadet::SimulationTime{0.0, 0u}, y.data(), nullptr, res.data(), bandMat.row(0), fp);
 
 		for (int col = 0; col < bandMat.rows(); ++col)
 		{

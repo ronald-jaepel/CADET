@@ -17,7 +17,7 @@
 #include "ParamReaderHelper.hpp"
 #include "AdUtils.hpp"
 #include "SimulationTypes.hpp"
-#include "model/parts/ConvectionDispersionKernel.hpp"
+#include "model/parts/AxialConvectionDispersionKernel.hpp"
 #include "SensParamUtil.hpp"
 
 #include "LoggingUtils.hpp"
@@ -282,7 +282,7 @@ int ConvectionDispersionOperatorBase::residualImpl(double t, unsigned int secIdx
 	const ParamType h = static_cast<ParamType>(_colLength) / static_cast<double>(_nCol);
 //	const int strideCell = strideColCell();
 
-	convdisp::FlowParameters<ParamType> fp{
+	convdisp::AxialFlowParameters<ParamType> fp{
 		u,
 		d_c,
 		h,
@@ -297,7 +297,7 @@ int ConvectionDispersionOperatorBase::residualImpl(double t, unsigned int secIdx
 		_nComp
 	};
 
-	return convdisp::residualKernel<StateType, ResidualType, ParamType, RowIteratorType, wantJac>(SimulationTime{t, secIdx}, y, yDot, res, jacBegin, fp);
+	return convdisp::residualKernelAxial<StateType, ResidualType, ParamType, RowIteratorType, wantJac>(SimulationTime{t, secIdx}, y, yDot, res, jacBegin, fp);
 }
 
 /**
