@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include <string>
+#include <iterator>
 #include <vector>
 
 namespace cadet
@@ -76,8 +77,8 @@ public:
 		_growthRateConstant = paramProvider.getDouble("CRY_GROWTH_RATE_CONSTANT");
 		_parameters[makeParamId(hashString("CRY_GROWTH_RATE_CONSTANT"), unitOpIdx, CompIndep, ParTypeIndep, BoundStateIndep, ReactionIndep, SectionIndep)] = &_growthRateConstant;
 
-		_growthConstant = paramProvider.getDouble("CRY_GRWOTH_CONSTANT");
-		_parameters[makeParamId(hashString("CRY_GRWOTH_CONSTANT"), unitOpIdx, CompIndep, ParTypeIndep, BoundStateIndep, ReactionIndep, SectionIndep)] = &_growthConstant;
+		_growthConstant = paramProvider.getDouble("CRY_GROWTH_CONSTANT");
+		_parameters[makeParamId(hashString("CRY_GROWTH_CONSTANT"), unitOpIdx, CompIndep, ParTypeIndep, BoundStateIndep, ReactionIndep, SectionIndep)] = &_growthConstant;
 
 		_b = paramProvider.getDouble("CRY_B");
 		_parameters[makeParamId(hashString("CRY_B"), unitOpIdx, CompIndep, ParTypeIndep, BoundStateIndep, ReactionIndep, SectionIndep)] = &_b;
@@ -156,7 +157,7 @@ public:
 
 	virtual void setExternalFunctions(IExternalFunction** extFuns, unsigned int size) { }
 	virtual bool dependsOnTime() const CADET_NOEXCEPT { return false; }
-	virtual bool requiresWorkspace() const CADET_NOEXCEPT { return true; }
+	virtual bool requiresWorkspace() const CADET_NOEXCEPT { return false; }
 	virtual unsigned int workspaceSize(unsigned int nComp, unsigned int totalNumBoundStates, unsigned int const* nBoundStates) const CADET_NOEXCEPT
 	{
 		return 0;
