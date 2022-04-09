@@ -270,7 +270,7 @@ protected:
 	int residualCombinedImpl(double t, unsigned int secIdx, const ColumnPosition& colPos,
 		StateType const* yLiquid, StateType const* ySolid, ResidualType* resLiquid, ResidualType* resSolid, double factor, LinearBufferAllocator workSpace) const
 	{
-		return 0;
+		return residualLiquidImpl<StateType, ResidualType, ParamType, double>(t, secIdx, colPos, yLiquid, resLiquid, factor, workSpace);
 	}
 
 	template <typename RowIterator>
