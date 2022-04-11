@@ -164,7 +164,7 @@ public:
 	}
 
 	virtual unsigned int numReactionsLiquid() const CADET_NOEXCEPT { return 1; }
-	virtual unsigned int numReactionsCombined() const CADET_NOEXCEPT { return 0; }
+	virtual unsigned int numReactionsCombined() const CADET_NOEXCEPT { return 1; }
 
 	CADET_DYNAMICREACTIONMODEL_BOILERPLATE
 
