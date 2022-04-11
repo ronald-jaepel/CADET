@@ -43,8 +43,7 @@
 #endif
 
 #define EIGEN_USE_MKL_ALL
-#include <Eigen/Dense> // use LA lib Eigen for Matrix operations
-#include <Eigen/Sparse>
+
 using namespace Eigen;
 
 namespace cadet
@@ -189,15 +188,17 @@ namespace cadet
 
 			// ==== Construct and configure binding model
 
-			paramProvider.pushScope("adsorption");
-			readScalarParameterOrArray(_disc.isKinetic, paramProvider, "IS_KINETIC", _disc.strideBound);
-			paramProvider.popScope();
-
 			clearBindingModels();
 			_binding.push_back(nullptr);
 
-			if (paramProvider.exists("ADSORPTION_MODEL"))
+			if (paramProvider.exists("ADSORPTION_MODEL")) {
 				_binding[0] = helper.createBindingModel(paramProvider.getString("ADSORPTION_MODEL"));
+				if (paramProvider.getString("ADSORPTION_MODEL") != "NONE") {
+					paramProvider.pushScope("adsorption");
+					readScalarParameterOrArray(_disc.isKinetic, paramProvider, "IS_KINETIC", _disc.strideBound);
+					paramProvider.popScope();
+				}
+			}
 			else
 				_binding[0] = helper.createBindingModel("NONE");
 
