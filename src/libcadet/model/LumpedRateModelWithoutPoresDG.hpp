@@ -996,10 +996,6 @@ protected:
 		unsigned int nCells = _disc.nCol;
 		unsigned int nComp = _disc.nComp;
 
-		// @TODO: special cases?
-		if (nCells < 3)
-			throw std::invalid_argument("Nodal Jacobian special case for nCells < 3 not implemented (yet?)");
-
 		/*======================================================*/
 		/*			Define Convection Jacobian Block			*/
 		/*======================================================*/
@@ -1040,16 +1036,18 @@ protected:
 
 		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell
 
-		// insert Blocks to Jacobian inner cells
-		for (unsigned int cell = 1; cell < nCells - 1; cell++) {
-			for (unsigned int comp = 0; comp < nComp; comp++) {
-				for (unsigned int i = 0; i < nNodes; i++) {
-					for (unsigned int j = 0; j < 3 * nNodes; j++) {
-						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
-						// col: jump over inlet DOFs and previous cells, go back one cell, add component offset and go node strides from there for each dispersion block entry
-						tripletList.push_back(T(offC + cell * sCell + comp * sComp + i * sNode,
-												offC + (cell - 1) * sCell + comp * sComp + j * sNode,
-												0.0));
+		// insert Blocks to Jacobian inner cells (only for nCells >= 3)
+		if (nCells >= 3u) {
+			for (unsigned int cell = 1; cell < nCells - 1; cell++) {
+				for (unsigned int comp = 0; comp < nComp; comp++) {
+					for (unsigned int i = 0; i < nNodes; i++) {
+						for (unsigned int j = 0; j < 3 * nNodes; j++) {
+							// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
+							// col: jump over inlet DOFs and previous cells, go back one cell, add component offset and go node strides from there for each dispersion block entry
+							tripletList.push_back(T(offC + cell * sCell + comp * sComp + i * sNode,
+								offC + (cell - 1) * sCell + comp * sComp + j * sNode,
+								0.0));
+						}
 					}
 				}
 			}
@@ -1057,22 +1055,24 @@ protected:
 
 		/*				Boundary cell Dispersion blocks			*/
 
-		for (unsigned int comp = 0; comp < nComp; comp++) {
-			for (unsigned int i = 0; i < nNodes; i++) {
-				for (unsigned int j = nNodes; j < 3 * nNodes; j++) {
-					tripletList.push_back(T(offC + comp * sComp + i * sNode,
-											offC + comp * sComp + (j - nNodes) * sNode,
-											0.0));
+		if (nCells != 1) { // Note: special case nCells = 1 already set by advection block
+			for (unsigned int comp = 0; comp < nComp; comp++) {
+				for (unsigned int i = 0; i < nNodes; i++) {
+					for (unsigned int j = nNodes; j < 3 * nNodes; j++) {
+						tripletList.push_back(T(offC + comp * sComp + i * sNode,
+							offC + comp * sComp + (j - nNodes) * sNode,
+							0.0));
+					}
 				}
 			}
-		}
 
-		for (unsigned int comp = 0; comp < nComp; comp++) {
-			for (unsigned int i = 0; i < nNodes; i++) {
-				for (unsigned int j = 0; j < 2 * nNodes; j++) {
-					tripletList.push_back(T(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
-											offC + (nCells - 1 - 1) * sCell + comp * sComp + j * sNode,
-											0.0));
+			for (unsigned int comp = 0; comp < nComp; comp++) {
+				for (unsigned int i = 0; i < nNodes; i++) {
+					for (unsigned int j = 0; j < 2 * nNodes; j++) {
+						tripletList.push_back(T(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
+							offC + (nCells - 1 - 1) * sCell + comp * sComp + j * sNode,
+							0.0));
+					}
 				}
 			}
 		}
@@ -1330,10 +1330,6 @@ protected:
 		unsigned int nCells = _disc.nCol;
 		unsigned int nComp = _disc.nComp;
 
-		// @TODO: special cases?
-		if (nCells < 3)
-			throw std::invalid_argument("Nodal Jacobian special case for nCells < 3 not implemented (yet?)");
-
 		/*======================================================*/
 		/*			Compute Dispersion Jacobian Block			*/
 		/*======================================================*/
@@ -1365,16 +1361,18 @@ protected:
 		dispBlock.block(nNodes - 1, 2 * nNodes + 1, 1, nNodes - 1) += _disc.invWeights[nNodes - 1] * (0.5 * GBlock.block(0, 2, 1, nNodes - 1)); // G_0,j-N-1		i=N, j=N+2,...,2N+1
 		dispBlock *= 2 / _disc.deltaZ;
 
-		// insert Blocks to Jacobian inner cells
-		for (unsigned int cell = 1; cell < nCells - 1; cell++) {
-			for (unsigned int comp = 0; comp < nComp; comp++) {
-				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
-					for (unsigned int j = 0; j < dispBlock.cols(); j++) {
-						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
-						// col: jump over inlet DOFs and previous cells, go back one cell, add component offset and go node strides from there for each dispersion block entry
-						_jac.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
-									  offC + (cell - 1) * sCell + comp * sComp + j * sNode)
-									  = -dispBlock(i, j) * _disc.dispersion[comp];
+		// insert Blocks to Jacobian inner cells (only for nCells >= 3)
+		if (nCells >= 3u) {
+			for (unsigned int cell = 1; cell < nCells - 1; cell++) {
+				for (unsigned int comp = 0; comp < nComp; comp++) {
+					for (unsigned int i = 0; i < dispBlock.rows(); i++) {
+						for (unsigned int j = 0; j < dispBlock.cols(); j++) {
+							// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
+							// col: jump over inlet DOFs and previous cells, go back one cell, add component offset and go node strides from there for each dispersion block entry
+							_jac.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
+								offC + (cell - 1) * sCell + comp * sComp + j * sNode)
+								= -dispBlock(i, j) * _disc.dispersion[comp];
+						}
 					}
 				}
 			}
@@ -1396,18 +1394,36 @@ protected:
 		dispBlock(nNodes - 1, 2 * nNodes) += _disc.invWeights[nNodes - 1] * (-0.5 * GBlockBound(nNodes - 1, nNodes + 1) + 0.5 * GBlock(0, 1)); // G_i,j		i=N, j=N+1
 		dispBlock.block(nNodes - 1, 2 * nNodes + 1, 1, nNodes - 1) += _disc.invWeights[nNodes - 1] * (0.5 * GBlock.block(0, 2, 1, nNodes - 1)); // G_0,j-N-1		i=N, j=N+2,...,2N+1
 		dispBlock *= 2 / _disc.deltaZ;
-		// copy *-1 to Jacobian
-		for (unsigned int comp = 0; comp < nComp; comp++) {
-			for (unsigned int i = 0; i < dispBlock.rows(); i++) {
-				for (unsigned int j = nNodes; j < dispBlock.cols(); j++) {
-					_jac.coeffRef(offC + comp * sComp + i * sNode,
-								  offC + comp * sComp + (j - nNodes) * sNode)
-								  = -dispBlock(i, j) * _disc.dispersion[comp];
+		if (nCells != 1u) { // "standard" case
+			// copy *-1 to Jacobian
+			for (unsigned int comp = 0; comp < nComp; comp++) {
+				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
+					for (unsigned int j = nNodes; j < dispBlock.cols(); j++) {
+						_jac.coeffRef(offC + comp * sComp + i * sNode,
+							offC + comp * sComp + (j - nNodes) * sNode)
+							= -dispBlock(i, j) * _disc.dispersion[comp];
+					}
+				}
+			}
+		}
+		else { // special case
+			dispBlock.setZero();
+			dispBlock.block(0, nNodes, nNodes, nNodes) = _disc.polyDerM * _disc.polyDerM;
+			dispBlock *= 2 / _disc.deltaZ;
+			// copy *-1 to Jacobian
+			for (unsigned int comp = 0; comp < nComp; comp++) {
+				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
+					for (unsigned int j = nNodes; j < nNodes * 2u; j++) {
+						_jac.coeffRef(offC + comp * sComp + i * sNode,
+							offC + comp * sComp + (j - nNodes) * sNode)
+							= -dispBlock(i, j) * _disc.dispersion[comp];
+					}
 				}
 			}
 		}
 
 		/* right cell */
+		if (nCells != 1u) { // "standard" case
 	   // adjust auxiliary Block [ d g(c) / d c ] for left boundary cell
 		GBlockBound(0, 1) += 0.5 * _disc.invWeights[0] * 2 / _disc.deltaZ; 	// reverse change from left boundary
 		GBlockBound(nNodes - 1, nNodes) += 0.5 * _disc.invWeights[polyDeg] * 2 / _disc.deltaZ;
@@ -1430,7 +1446,7 @@ protected:
 				}
 			}
 		}
-
+		} // "standard" case
 		/*======================================================*/
 		/*			Compute Convection Jacobian Block			*/
 		/*======================================================*/
