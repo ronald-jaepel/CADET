@@ -40,7 +40,6 @@
 
 #include <Eigen/Dense> // use LA lib Eigen for Matrix operations
 #include <Eigen/Sparse>
-
 #ifndef _USE_MATH_DEFINES
 #define _USE_MATH_DEFINES
 #include <math.h>
@@ -274,31 +273,25 @@ protected:
 
 			newStaticJac = true;
 
+			// @TODO: make exact, inexact integration switch during calculation possible?
 			lglNodesWeights();
-			// @TODO: make modal/nodal switch during calculation possible?
-			if (modal) {
-				derivativeMatrix_JACOBI();
-				invMMatrix_JACOBI();
-			}
-			else {
-				derivativeMatrix_LAGRANGE();
-				invMMatrix_JACOBI(); // modal/nodal switch
-			}
+			invMMatrix();
+			derivativeMatrix();
 		}
 
 	private:
 
 		/* ===================================================================================
-		*   Lagrange Basis operators and auxiliary functions
+		*   Polynomial Basis operators and auxiliary functions
 		* =================================================================================== */
 
 		/**
 		* @brief computes the Legendre polynomial L_N and q = L_N+1 - L_N-2 and q' at point x
 		* @param [in] polyDeg polynomial degree of spatial Discretization
 		* @param [in] x evaluation point
-		* @param [in] L pre-allocated L(x)
-		* @param [in] q pre-allocated q(x)
-		* @param [in] qder pre-allocated q'(x)
+		* @param [in] L <- L(x)
+		* @param [in] q <- q(x) = L_N+1 (x) - L_N-2(x)
+		* @param [in] qder <- q'(x) = [L_N+1 (x) - L_N-2(x)]'
 		*/
 		void qAndL(const double x, double& L, double& q, double& qder) {
 			// auxiliary variables (Legendre polynomials)
@@ -307,7 +300,7 @@ protected:
 			double Lder_2 = 0.0;
 			double Lder_1 = 1.0;
 			double Lder = 0.0;
-			for (double k = 2; k <= polyDeg; k++) {
+			for (double k = 2; k <= polyDeg; k++) { // note that this function is only called for polyDeg >= 2.
 				L = ((2 * k - 1) * x * L_1 - (k - 1) * L_2) / k;
 				Lder = Lder_2 + (2 * k - 1) * L_1;
 				L_2 = L_1;
@@ -320,7 +313,8 @@ protected:
 		}
 
 		/**
-		 * @brief computes and assigns the Legendre-Gauss nodes and (inverse) weights
+		 * @brief computes the Legendre-Gauss-Lobatto nodes and (inverse) quadrature weights
+		 * @detail inexact LGL-quadrature leads to a diagonal mass matrix (mass lumping), defined by the quadrature weights
 		 */
 		void lglNodesWeights() {
 			// tolerance and max #iterations for Newton iteration
@@ -375,9 +369,9 @@ protected:
 
 		/**
 		 * @brief computation of barycentric weights for fast polynomial evaluation
-		 * @param [in] weights pre-allocated vector for barycentric weights. Must be set to ones!
+		 * @param [in] baryWeights vector to store barycentric weights. Must already be initialized with ones!
 		 */
-		void barycentricWeights(VectorXd& baryWeights) {
+		void barycentricWeights(Eigen::VectorXd& baryWeights) {
 			for (unsigned int j = 1; j <= polyDeg; j++) {
 				for (unsigned int k = 0; k <= j - 1; k++) {
 					baryWeights[k] = baryWeights[k] * (nodes[k] - nodes[j]) * 1.0;
@@ -390,10 +384,10 @@ protected:
 		}
 
 		/**
-		 * @brief computation of LAGRANGE polynomial derivative matrix
+		 * @brief computation of nodal (lagrange) polynomial derivative matrix
 		 */
-		void derivativeMatrix_LAGRANGE() {
-			VectorXd baryWeights = VectorXd::Ones(polyDeg + 1u);
+		void derivativeMatrix() {
+			Eigen::VectorXd baryWeights = Eigen::VectorXd::Ones(polyDeg + 1u);
 			barycentricWeights(baryWeights);
 			for (unsigned int i = 0; i <= polyDeg; i++) {
 				for (unsigned int j = 0; j <= polyDeg; j++) {
@@ -405,110 +399,61 @@ protected:
 			}
 		}
 
-		/* ===================================================================================
-		*   Jacobi Basis operators and auxiliary functions
-		* =================================================================================== */
+		/**
+		 * @brief factor to normalize legendre polynomials
+		 */
+		double orthonFactor(int polyDeg) {
 
-		/*
-		* @brief computation of normalized Jacobi polynomial P of order N at nodes x
-		*/
-		void jacobiPolynomial(const double alpha, const double beta, const int N, MatrixXd& P, int index) {
-			// factor needed to normalize the Jacobi polynomial using the gamma function
-			double gamma0 = std::pow(2.0, alpha + beta + 1.0) / (alpha + beta + 1.0) * std::tgamma(alpha + 1.0) * std::tgamma(beta + 1) / std::tgamma(alpha + beta + 1);
-			MatrixXd PL(N + 1, nodes.size());
-			for (unsigned int i = 0; i < nodes.size(); ++i) {
-				PL(0, i) = 1.0 / std::sqrt(gamma0);
-			}
-			if (N == 0) {
-				for (unsigned int i = 0; i < nodes.size(); ++i) {
-					P(i, index) = PL(0, i);
-				}
-				return;
-			}
-			double gamma1 = (alpha + 1) * (beta + 1) / (alpha + beta + 3) * gamma0;
-			for (unsigned int i = 0; i < nodes.size(); ++i) {
-				PL(1, i) = ((alpha + beta + 2) * nodes(i) / 2 + (alpha - beta) / 2) / std::sqrt(gamma1);
-			}
-			if (N == 1) {
-				for (unsigned int i = 0; i < nodes.size(); ++i) {
-					P(i, index) = PL(1, i);
-				}
-				return;
-			}
-			double a = 2.0 / (2.0 + alpha + beta) * std::sqrt((alpha + 1) * (beta + 1) / (alpha + beta + 3));
-			for (unsigned int i = 0; i < N - 1; ++i) {
-				double j = i + 1.0;
-				double h1 = 2.0 * (i + 1.0) + alpha + beta;
-				double a_aux = 2.0 / (h1 + 2.0) * std::sqrt((j + 1.0) * (j + 1.0 + alpha + beta) * (j + 1.0 + alpha) * (j + 1.0 + beta) / (h1 + 1) / (h1 + 3));
-				double b = -(std::pow(alpha, 2) - std::pow(beta, 2)) / h1 / (h1 + 2);
-
-				for (unsigned int k = 0; k < nodes.size(); ++k) {
-					PL(i + 2, k) = 1 / a_aux * (-a * PL(i, k) + (nodes(k) - b) * PL(i + 1, k));
-				}
-				a = a_aux;
-			}
-			for (unsigned int i = 0; i < nodes.size(); ++i) {
-				P(i, index) = PL(N, i);
-			}
+			double n = static_cast<double> (polyDeg);
+			// alpha = beta = 0 to get legendre polynomials as special case from jacobi polynomials.
+			double a = 0.0;
+			double b = 0.0;
+			return std::sqrt(((2.0 * n + a + b + 1.0) * std::tgamma(n + 1.0) * std::tgamma(n + a + b + 1.0))
+				/ (std::pow(2.0, a + b + 1.0) * std::tgamma(n + a + 1.0) * std::tgamma(n + b + 1.0)));
 		}
 
 		/**
-		* @brief returns generalized Jacobi Vandermonde matrix
-		* @detail normalized Legendre Vandermonde matrix
-		*/
-		MatrixXd getVandermonde_JACOBI() {
+		 * @brief calculates the Vandermonde matrix of the normalized legendre polynomials
+		 */
+		Eigen::MatrixXd getVandermonde_LEGENDRE() {
 
-			MatrixXd V(nodes.size(), nodes.size());
+			Eigen::MatrixXd V(nodes.size(), nodes.size());
 
-			for (unsigned int j = 0; j < V.cols(); ++j) {
-				// legendre polynomial: alpha = beta = 0.0
-				jacobiPolynomial(0.0, 0.0, j, V, j);
-			}
-			return V;
-		}
-
-		/*
-		* @brief computes the gradient vandermonde matrix of orthonormal Legendre polynomials
-		* @V_x [in] pre-allocated gradient Vandermonde matrix
-		*/
-		void GradVandermonde(MatrixXd& V_x) {
-			// Legendre polynomial
 			double alpha = 0.0;
 			double beta = 0.0;
 
-			for (unsigned int order = 1; order < nodes.size(); order++) {
-				jacobiPolynomial(alpha + 1, beta + 1, order - 1, V_x, order);
-				V_x.block(0, order, V_x.rows(), 1) *= std::sqrt(order * (order + alpha + beta + 1));
+			// degree 0
+			V.block(0, 0, nNodes, 1) = VectorXd::Ones(nNodes) * orthonFactor(0);
+			// degree 1
+			for (int node = 0; node < static_cast<int>(nNodes); node++) {
+				V(node, 1) = nodes[node] * orthonFactor(1);
 			}
+
+			for (int deg = 2; deg <= static_cast<int>(polyDeg); deg++) {
+
+				for (int node = 0; node < static_cast<int>(nNodes); node++) {
+
+					double orthn_1 = orthonFactor(deg) / orthonFactor(deg - 1);
+					double orthn_2 = orthonFactor(deg) / orthonFactor(deg - 2);
+
+					double fac_1 = ((2.0 * deg - 1.0) * 2.0 * deg * (2.0 * deg - 2.0) * nodes[node]) / (2.0 * deg * deg * (2.0 * deg - 2.0));
+					double fac_2 = (2.0 * (deg - 1.0) * (deg - 1.0) * 2.0 * deg) / (2.0 * deg * deg * (2.0 * deg - 2.0));
+
+					V(node, deg) = orthn_1 * fac_1 * V(node, deg - 1) - orthn_2 * fac_2 * V(node, deg - 2);
+
+				}
+
+			}
+
+			return V;
 		}
 
-		//@TODO?: Not needed? as the D matrix is (approx) the same as for the nodal approach ! (and computed without matrix inversion or linear solve)
-		//        D_nod is approx D_mod to 1e-14 but not up to std::numeric_limits<double>::epsilon()... relevant ?
 		/**
-		 * @brief computes the Jacobi polynomial derivative matrix D
-		 * @detail computes the normalized Legendre polynomial derivative matrix D
-		 */
-		void derivativeMatrix_JACOBI() {
-
-			// Compute the gradient Vandermonde matrix and transpose
-			const int Np = nodes.size();
-			GradVandermonde(polyDerM);
-			MatrixXd V_xT = polyDerM.transpose();
-
-			// Instead of using matrix inversion, solve the linear systems to obtain D using SVD decomposition (slow but accurate)
-			for (unsigned int i = 0; i < Np; ++i) {
-				polyDerM.block(i, 0, 1, Np) = (getVandermonde_JACOBI().transpose().jacobiSvd(Eigen::ComputeFullU |
-					Eigen::ComputeFullV).solve(V_xT.block(0, i, Np, 1))).transpose();
-			}
-		}
-
-		/**
-		* @brief returns Jacobi polynomial induced mass matrix
-		* @detail returns normalized Legendre polynomial induced mass matrix
-		* @param [in] nodes (LGL)
+		* @brief calculates mass matrix for exact polynomial integration
+		* @detail exact polynomial integration leads to a full mass matrix
 		*/
-		void invMMatrix_JACOBI() {
-			invMM = (getVandermonde_JACOBI() * (getVandermonde_JACOBI().transpose()));
+		void invMMatrix() {
+			invMM = (getVandermonde_LEGENDRE() * (getVandermonde_LEGENDRE().transpose()));
 		}
 
 	};
@@ -1101,7 +1046,6 @@ protected:
 		/*======================================================*/
 
 		// Convection block [ d RHS_conv / d c ], additionally depends on first entry of previous cell
-		MatrixXd convBlock = MatrixXd::Zero(nNodes, nNodes + 1);
 		// special inlet DOF treatment for first cell
 		for (unsigned int comp = 0; comp < nComp; comp++) {
 			for (unsigned int i = 0; i < nNodes; i++) {
@@ -1134,7 +1078,6 @@ protected:
 		/* Inner cells */
 		if (nCells >= 5u) {
 			// Inner dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-			//MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
 			for (unsigned int cell = 2; cell < nCells - 2; cell++) {
 				for (unsigned int comp = 0; comp < nComp; comp++) {
 					for (unsigned int i = 0; i < nNodes; i++) {
