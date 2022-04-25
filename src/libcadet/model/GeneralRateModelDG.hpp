@@ -355,9 +355,9 @@ protected:
 			// particle
 			for (int parType = 0; parType < nParType; parType++) {
 				nParNode[parType] = parPolyDeg[parType] + 1u;
-				g_p[parType].resize(nParNode[parType]);
+				g_p[parType].resize(nParPoints[parType]);
 				g_p[parType].setZero();
-				g_pSum[parType].resize(nParNode[parType]);
+				g_pSum[parType].resize(nParPoints[parType]);
 				g_pSum[parType].setZero();
 				surfaceFluxParticle[parType].resize(nParCell[parType] + 1);
 				surfaceFluxParticle[parType].setZero();
@@ -1500,7 +1500,7 @@ protected:
 	/**
 	 * @brief calculates the particle dispersion jacobian Pattern of the nodal DG scheme for one particle type and bead
 	*/
-	int calcNodalParticleJacobianPattern(unsigned int parType, Eigen::SparseMatrix<double, RowMajor>& jacP) {
+	void calcNodalParticleJacobianPattern(unsigned int parType, Eigen::SparseMatrix<double, RowMajor>& jacP) {
 
 		// (global) strides
 		Indexer idxr(_disc);
@@ -1561,7 +1561,7 @@ protected:
 		// ordering of parSurfDiff: bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2
 		// -> so we need to get the strides in order to extract the component of interest
 		unsigned int* nBnd = new unsigned int[_disc.nComp];
-		std::copy_n(_disc.nBound[parType * _disc.nComp], _disc.nComp, nBnd[0]);
+		std::copy_n(&_disc.nBound[parType * _disc.nComp], _disc.nComp, &nBnd[0]);
 		Eigen::VectorXi stride = Eigen::VectorXi::Zero(_disc.nBound[parType * _disc.nComp + comp] + 1); // last entry is just a placeholder
 		for (int i = 0; i < _disc.nBound[parType * _disc.nComp + comp]; i++) {
 			for (int _comp = 0; _comp < _disc.nComp; _comp++) {
