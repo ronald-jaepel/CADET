@@ -646,8 +646,8 @@ int GeneralRateModelDG::linearSolve(double t, double alpha, double outerTol, dou
 					assembleDiscretizedJacobianParticleBlock(type, par, alpha, idxr);
 
 					// Factorize
-					const bool result = _jacPdisc[pblk].factorize();
-					if (cadet_unlikely(!result))
+					_parSolver[type * _disc.nPoints + par].factorize(_jacPdisc[type * _disc.nPoints + par]);
+					if (_parSolver[type * _disc.nPoints + par].info() != Eigen::Success)
 					{
 						{
 							LOG(Error) << "Factorize() failed for par block " << pblk;
@@ -706,8 +706,9 @@ int GeneralRateModelDG::linearSolve(double t, double alpha, double outerTol, dou
 			{
 				const unsigned int type = pblk / _disc.nPoints;
 				const unsigned int par = pblk % _disc.nPoints;
-				const bool result = _jacPdisc[pblk].solve(rhs + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }));
-				if (cadet_unlikely(!result))
+				Eigen::Map<VectorXd> r(rhs + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }), _disc.nParPoints[type]);
+				_parSolver[type * _disc.nPoints + par].solve(r);
+				if (_parSolver[type * _disc.nPoints + par].info() != Eigen::Success)
 				{
 					LOG(Error) << "Solve() failed for par block " << pblk;
 				}
@@ -805,8 +806,9 @@ int GeneralRateModelDG::linearSolve(double t, double alpha, double outerTol, dou
 				// Compute tempState_i = J_{i,f} * y_f
 				_jacPF[pblk].multiplyAdd(rhs + idxr.offsetJf(), localPar);
 				// Apply J_i^{-1} to tempState_i
-				const bool result = _jacPdisc[pblk].solve(localPar);
-				if (cadet_unlikely(!result))
+				Eigen::Map<VectorXd> r(localPar, _disc.nParPoints[type]);
+				_parSolver[type * _disc.nPoints + par].solve(r);
+				if (_parSolver[type * _disc.nPoints + par].info() != Eigen::Success)
 				{
 					LOG(Error) << "Solve() failed for par block " << pblk;
 				}
@@ -923,8 +925,9 @@ int GeneralRateModelDG::schurComplementMatrixVector(double const* x, double* z) 
 				// Apply J_{i,f}
 				_jacPF[pblk].multiplyAdd(x, tmp);
 				// Apply J_{i}^{-1}
-				const bool result = _jacPdisc[pblk].solve(tmp);
-				if (cadet_unlikely(!result))
+				Eigen::Map<VectorXd> r(tmp, _disc.nParPoints[type]);
+				_parSolver[type * _disc.nPoints + par].solve(r);
+				if (_parSolver[type * _disc.nPoints + par].info() != Eigen::Success)
 				{
 					LOG(Error) << "Solve() failed for par block " << pblk;
 				}
@@ -1014,19 +1017,23 @@ void GeneralRateModelDG::assembleDiscretizedBulkJacobian(double alpha, Indexer i
  */
 void GeneralRateModelDG::assembleDiscretizedJacobianParticleBlock(unsigned int parType, unsigned int pblk, double alpha, const Indexer& idxr)
 {
-	linalg::FactorizableBandMatrix& fbm = _jacPdisc[_disc.nPoints * parType + pblk];
-	const linalg::BandMatrix& bm = _jacP[_disc.nPoints * parType + pblk];
 
-	// Copy normal matrix over to factorizable matrix
-	fbm.copyOver(bm);
+	double* vPtr = _jacPdisc[_disc.nPoints * parType + pblk].valuePtr();
+	for (int k = 0; k < _jacPdisc[_disc.nPoints * parType + pblk].nonZeros(); k++) {
+		*vPtr = 0.0;
+		vPtr++;
+	}
 
 	// Add time derivatives to particle shells
-	linalg::FactorizableBandMatrix::RowIterator jac = fbm.row(0);
+	linalg::BandedEigenSparseRowIterator jac (_jacPdisc[_disc.nPoints * parType + pblk], 0);
 	for (unsigned int j = 0; j < _disc.nParCell[parType]; ++j)
 	{
 		addTimeDerivativeToJacobianParticleShell(jac, idxr, alpha, parType);
 		// Iterator jac has already been advanced to next shell
 	}
+
+	// add static (per section) jacobian
+	_jacPdisc[_disc.nPoints * parType + pblk] += _jacP[_disc.nPoints * parType + pblk];
 }
 
 /**
@@ -1039,9 +1046,9 @@ void GeneralRateModelDG::assembleDiscretizedJacobianParticleBlock(unsigned int p
  * @param [in] alpha Value of \f$ \alpha \f$ (arises from BDF time discretization)
  * @param [in] parType Index of the particle type
  */
-void GeneralRateModelDG::addTimeDerivativeToJacobianParticleShell(linalg::FactorizableBandMatrix::RowIterator& jac, const Indexer& idxr, double alpha, unsigned int parType)
+void GeneralRateModelDG::addTimeDerivativeToJacobianParticleShell(linalg::BandedEigenSparseRowIterator& jac, const Indexer& idxr, double alpha, unsigned int parType)
 {
-	parts::cell::addTimeDerivativeToJacobianParticleShell<linalg::FactorizableBandMatrix::RowIterator, true>(jac, alpha, static_cast<double>(_parPorosity[parType]), _disc.nComp, _disc.nBound + _disc.nComp * parType,
+	parts::cell::addTimeDerivativeToJacobianParticleShell<linalg::BandedEigenSparseRowIterator, true>(jac, alpha, static_cast<double>(_parPorosity[parType]), _disc.nComp, _disc.nBound + _disc.nComp * parType,
 		_poreAccessFactor.data() + _disc.nComp * parType, _disc.strideBound[parType], _disc.boundOffset + _disc.nComp * parType, _binding[parType]->reactionQuasiStationarity());
 }
 
