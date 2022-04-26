@@ -245,7 +245,7 @@ protected:
 	void assembleDiscretizedBulkJacobian(double alpha, Indexer idxr);
 	int schurComplementMatrixVector(double const* x, double* z) const;
 	void assembleDiscretizedJacobianParticleBlock(unsigned int parType, unsigned int pblk, double alpha, const Indexer& idxr);
-	
+	//@TODO?
 	void setEquidistantRadialDisc(unsigned int parType);
 	void setEquivolumeRadialDisc(unsigned int parType);
 	void setUserdefinedRadialDisc(unsigned int parType);
@@ -277,7 +277,7 @@ protected:
 		unsigned int modal;	//!< bool switch: 1 for modal basis, 0 for nodal basis
 		unsigned int nParType; //!< Number of particle types
 		unsigned int* nParCell; //!< Array with number of radial cells in each particle type
-		unsigned int* nParCellsBeforeType; //!< Array with total number of radial cells before a particle type (cumulative sum of nParCell), additional last element contains total number of particle shells
+		unsigned int* nParPointsBeforeType; //!< Array with total number of radial points before a particle type (cumulative sum of nParPoints), additional last element contains total number of particle shells
 		unsigned int* parPolyDeg; //!< polynomial degree of particle elements
 		unsigned int* nParNode; //!< Array with number of radial nodes per cell in each particle type
 		unsigned int* nParPoints; //!< Array with number of radial nodes per cell in each particle type
@@ -353,8 +353,18 @@ protected:
 			surfaceFlux.resize(nCol + 1);
 			surfaceFlux.setZero();
 			// particle
+			nParNode = new unsigned int [nParType];
+			nParPoints = new unsigned int [nParType];
+			g_p = new VectorXd [nParType];
+			g_pSum = new VectorXd [nParType];
+			surfaceFluxParticle = new VectorXd [nParType];
+			parNodes = new VectorXd [nParType];
+			parInvWeights = new VectorXd [nParType];
+			parPolyDerM = new MatrixXd [nParType];
+			parInvMM = new MatrixXd [nParType];
 			for (int parType = 0; parType < nParType; parType++) {
 				nParNode[parType] = parPolyDeg[parType] + 1u;
+				nParPoints[parType] = nParNode[parType] * nParCell[parType];
 				g_p[parType].resize(nParPoints[parType]);
 				g_p[parType].setZero();
 				g_pSum[parType].resize(nParPoints[parType]);
@@ -747,11 +757,11 @@ protected:
 		virtual unsigned int numInletPorts() const CADET_NOEXCEPT { return 1; }
 		virtual unsigned int numOutletPorts() const CADET_NOEXCEPT { return 1; }
 		virtual unsigned int numParticleTypes() const CADET_NOEXCEPT { return _disc.nParType; }
-		virtual unsigned int numParticleShells(unsigned int parType) const CADET_NOEXCEPT { return _disc.nParCell[parType]; }
+		virtual unsigned int numParticleShells(unsigned int parType) const CADET_NOEXCEPT { return _disc.nParPoints[parType]; }
 		virtual unsigned int numBoundStates(unsigned int parType) const CADET_NOEXCEPT { return _disc.strideBound[parType]; }
 		virtual unsigned int numBulkDofs() const CADET_NOEXCEPT { return _disc.nComp * _disc.nPoints; }
-		virtual unsigned int numParticleMobilePhaseDofs(unsigned int parType) const CADET_NOEXCEPT { return _disc.nPoints * _disc.nParCell[parType] * _disc.nComp; }
-		virtual unsigned int numSolidPhaseDofs(unsigned int parType) const CADET_NOEXCEPT { return _disc.nPoints * _disc.nParCell[parType] * _disc.strideBound[parType]; }
+		virtual unsigned int numParticleMobilePhaseDofs(unsigned int parType) const CADET_NOEXCEPT { return _disc.nPoints * _disc.nParPoints[parType] * _disc.nComp; }
+		virtual unsigned int numSolidPhaseDofs(unsigned int parType) const CADET_NOEXCEPT { return _disc.nPoints * _disc.nParPoints[parType] * _disc.strideBound[parType]; }
 		virtual unsigned int numFluxDofs() const CADET_NOEXCEPT { return _disc.nComp * _disc.nPoints * _disc.nParType; }
 		virtual unsigned int numVolumeDofs() const CADET_NOEXCEPT { return 0; }
 
@@ -803,7 +813,7 @@ protected:
 		virtual unsigned int solidPhaseStride(unsigned int parType) const { return _idx.strideParShell(parType); }
 
 		/**
-		* @brief calculates the physical node coordinates of the DG discretization with double! interface nodes
+		* @brief calculates the physical axial/column coordinates of the DG discretization with double! interface nodes
 		*/
 		virtual void axialCoordinates(double* coords) const {
 			Eigen::VectorXd x_l = Eigen::VectorXd::LinSpaced(static_cast<int>(_disc.nCol + 1), 0.0, _disc.length_);
@@ -815,12 +825,14 @@ protected:
 			}
 		}
 		virtual void radialCoordinates(double* coords) const { }
-		// @TODO?
+		/**
+		* @brief calculates the physical radial/particle coordinates of the DG discretization with double! interface nodes
+		*/
 		virtual void particleCoordinates(unsigned int parType, double* coords) const
 		{
-			active const* const pcr = _model._parCenterRadius.data() + _disc.nParCellsBeforeType[parType];
-			for (unsigned int i = 0; i < _disc.nParCell[parType]; ++i)
-				coords[i] = static_cast<double>(pcr[i]);
+			for (unsigned int par = 0; par < _disc.nParPoints[parType]; par++)
+				coords[par] = _disc.deltaR[parType] * std::floor(par / _disc.nParNode[parType])
+				+ 0.5 * _disc.deltaR[parType] * (1 + _disc.nodes[par % _disc.nParNode[parType]]);;
 		}
 
 	protected:
@@ -880,6 +892,13 @@ protected:
 		for (unsigned int Cell = 0; Cell < _disc.nCol; Cell++) {
 			stateDer.segment(Cell * _disc.nNodes, _disc.nNodes)
 				-= _disc.polyDerM * state.segment(Cell * _disc.nNodes, _disc.nNodes);
+		}
+	}
+	void parVolumeIntegral(int parType, Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>>& state, Eigen::Map<VectorXd, 0, InnerStride<Dynamic>>& stateDer) {
+		// comp-cell-node state vector: use of Eigen lib performance
+		for (unsigned int Cell = 0; Cell < _disc.nParCell[parType]; Cell++) {
+			stateDer.segment(Cell * _disc.nParNode[parType], _disc.nParNode[parType])
+				-= _disc.parPolyDerM[parType] * state.segment(Cell * _disc.nParNode[parType], _disc.nParNode[parType]);
 		}
 	}
 
@@ -1112,7 +1131,7 @@ protected:
 	void solve_auxiliary_DG(int parType, Eigen::Map<const VectorXd, 0, InnerStride<>>& conc, unsigned int strideCell, unsigned int strideNode) {
 
 		Indexer idxr(_disc);
-		Eigen::Map<VectorXd, 0, InnerStride<>> g_p(&_disc.g_p[parType][0], _disc.nPoints, InnerStride<>(1));
+		Eigen::Map<VectorXd, 0, InnerStride<>> g_p(&_disc.g_p[parType][0], _disc.nParPoints[parType], InnerStride<>(1));
 		unsigned int comp = 0; // comp is just a placeholder here
 
 		// =================================================================//
@@ -1121,26 +1140,15 @@ protected:
 		
 		// reset surface flux storage as it is used multiple times
 		_disc.surfaceFluxParticle[parType].setZero();
-		// get relevant concentration vector
-		g_p.setZero(); // reset g
-		// DG volumne integral in strong form
-		volumeIntegral(conc, g_p);
-		// surface integral in strong form
+		// reset auxiliary g
+		g_p.setZero();
+		// DG volumne integral: - D c
+		parVolumeIntegral(parType, conc, g_p);
+		// surface integral: M^-1 B [c - c^*]
 		surfaceIntegralParticle(parType, conc, g_p, strideCell, strideNode);
 		// inverse mapping from reference space and auxiliary factor -1
 		g_p *= - 2.0 / _disc.deltaR[parType];
 
-	}
-
-	/**
-	* @brief computes ghost nodes used to implement Danckwerts boundary conditions of particles
-	*/
-	void calcParticleBoundaryValues(Eigen::Map<const VectorXd, 0, InnerStride<>>& C) {
-
-		//cache.boundary[0] = c_in -> inlet DOF idas suggestion
-		_disc.boundary[1] = C[_disc.nPoints - 1]; // c_r outlet
-		_disc.boundary[2] = -_disc.g[0]; // S_l inlet
-		_disc.boundary[3] = -_disc.g[_disc.nPoints - 1]; // g_r outlet
 	}
 
 	// ==========================================================================================================================================================  //
@@ -1162,6 +1170,20 @@ protected:
 			ConvDispModalPattern(tripletList);
 		else
 			ConvDispNodalPattern(tripletList);
+
+		mat.setFromTriplets(tripletList.begin(), tripletList.end());
+
+	}
+	void setParDispJacPattern(int parType, Eigen::SparseMatrix<double, RowMajor>& mat) {
+
+		std::vector<T> tripletList;
+		// TODO?: convDisp NNZ times two for now, but Convection NNZ < Dispersion NNZ
+		tripletList.reserve(calcParDispNNZ(parType, _disc));
+
+		if (!_disc.parModal[parType])
+			calcNodalParticleJacobianPattern(parType, tripletList, mat);
+		//else
+			//calcModalParticleJacobianPattern(parType, tripletList, mat);
 
 		mat.setFromTriplets(tripletList.begin(), tripletList.end());
 
@@ -1477,7 +1499,7 @@ protected:
 		// DG particle dispersion Jacobian
 		if (_disc.parModal[parType])
 			throw std::invalid_argument("modal/exact integration Particle Jacobian not implemented yet");
-			//calcModalParticleJacobian(_jacP[parType * colNode]);
+			//calcModalParticleJacobian(parType, _jacP[parType * colNode]);
 		else
 			calcNodalParticleJacobian(parType, parDiff, parSurfDiff, invBetaP, _jacP[parType * _disc.nPoints + colNode]);
 
@@ -1500,7 +1522,7 @@ protected:
 	/**
 	 * @brief calculates the particle dispersion jacobian Pattern of the nodal DG scheme for one particle type and bead
 	*/
-	void calcNodalParticleJacobianPattern(unsigned int parType, Eigen::SparseMatrix<double, RowMajor>& jacP) {
+	void calcNodalParticleJacobianPattern(unsigned int parType, std::vector<T>& tripletList, Eigen::SparseMatrix<double, RowMajor>& jacP) {
 
 		// (global) strides
 		Indexer idxr(_disc);
@@ -1513,23 +1535,36 @@ protected:
 
 			// fill the jacobian: add dispersion block for each unbound and bound component, adjusted for the respective coefficients
 			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
-				// get bound and liquid diffusion coefficients for current component
 				for (unsigned int i = 0; i < _disc.nParPoints[parType]; i++) {
 					for (unsigned int j = 0; j < _disc.nParPoints[parType]; j++) {
-						// handle liquid state
+						// handle liquid state: self dependency
 						// row: add component offset and go node strides from there for each dispersion block entry
 						// col: add component offset and go node strides from there for each dispersion block entry
-						jacP.coeffRef(comp * sComp + i * sNode,
-									  comp * sComp + j * sNode)
-							= 0.0; // diffBlock += invMap* D_p * (M^-1 * M_r * D + invMap * (D * D - M^-1 * B * D))
+						tripletList.push_back(T(comp * sComp + i * sNode,
+											    comp * sComp + j * sNode,
+							1.0));
 
-						// handle bound states
-						for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-							// row: add bound state offset and go node strides from there for each dispersion block entry
-							// col: add bound state offset and go node strides from there for each dispersion block entry
-							jacP.coeffRef(idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + i * sNode,
-										  idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + j * sNode)
-								= 0.0; // diffBlock += invMap* D_p * (M^-1 * M_r * D + invMap * (D * D - M^-1 * B * D))
+						// handle bound states: surface diffusion
+						if (_hasSurfaceDiffusion[parType]) {
+							for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
+							// with surface diffusion, the residual of the particle equation depends on all bound states
+							// row: add component offset and go node strides from there for each dispersion block entry
+							// col: jump over liquid states, add offset to first bound state of current component, add current bound state offset
+							//		and go node strides from there for each dispersion block entry
+							tripletList.push_back(T(comp * sComp + i * sNode,
+													idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode,
+								2.0));
+							}
+						}
+					}
+					// handle bound states: binding (local dependency on point i)
+					for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
+						// row:	add current component offset. jump over previous points and liquid concentration, add the offset of the current bound state
+						// col: jump over previous points and add entries for all liquid and bound concentrations
+						for (int conc = 0; conc < sNode; conc++) {
+							tripletList.push_back(T(comp * sComp + i * sNode + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd,
+													i * sNode + conc,
+								3.0));
 						}
 					}
 				}
@@ -1694,6 +1729,15 @@ protected:
 		}
 		else {
 			return disc.nComp * (disc.nCol * disc.nNodes * disc.nNodes + 8u * disc.nNodes);
+		}
+	}
+	unsigned int calcParDispNNZ(int parType, Discretization disc) {
+
+		if (disc.parModal) {
+			return disc.nComp * ((3u * disc.nParCell[parType] - 2u) * disc.nParNode[parType] * disc.nParNode[parType] + (2u * disc.nParCell[parType] - 3u) * disc.nParNode[parType]);
+		}
+		else {
+			return disc.nComp * (disc.nParCell[parType] * disc.nParNode[parType] * disc.nParNode[parType] + 8u * disc.nParNode[parType]);
 		}
 	}
 
