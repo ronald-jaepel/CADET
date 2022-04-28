@@ -608,13 +608,14 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 				throw std::invalid_argument("modal/exact integration Particle Jacobian not implemented yet");
 		else {
 			for (int colNode = 0; colNode < _disc.nPoints; colNode++) {
-				_jacP[j * _disc.nCol + colNode].resize(_disc.nParPoints[j] * (_disc.nComp + _disc.strideBound[j]),
+				_jacP[j * _disc.nPoints + colNode].resize(_disc.nParPoints[j] * (_disc.nComp + _disc.strideBound[j]),
 													   _disc.nParPoints[j] * (_disc.nComp + _disc.strideBound[j]));
-				_jacPdisc[j * _disc.nCol + colNode].resize(_disc.nParPoints[j] * (_disc.nComp + _disc.strideBound[j]),
-					_disc.nParPoints[j] * (_disc.nComp + _disc.strideBound[j]));
-				setParDispJacPattern(j, _jacP[j * _disc.nCol + colNode]);
-				setParDispJacPattern(j, _jacPdisc[j * _disc.nCol + colNode]);
-				_parSolver[j * _disc.nCol + colNode].analyzePattern(_jacPdisc[j * _disc.nCol + colNode]);
+				_jacPdisc[j * _disc.nPoints + colNode].resize(_disc.nParPoints[j] * (_disc.nComp + _disc.strideBound[j]),
+														   _disc.nParPoints[j] * (_disc.nComp + _disc.strideBound[j]));
+				setParDispJacPattern(j, _jacP[j * _disc.nPoints + colNode]);
+				// _jacPdisc pattern needs to be reset after consistent initialization. so its probably unnecessary to also set the pattern here.
+				setParDispJacPattern(j, _jacPdisc[j * _disc.nPoints + colNode]);
+				_parSolver[j * _disc.nPoints + colNode].analyzePattern(_jacPdisc[j * _disc.nPoints + colNode]);
 			}
 		}
 	}
@@ -1236,7 +1237,6 @@ int GeneralRateModelDG::residualImpl(double t, unsigned int secIdx, StateType co
 			const unsigned int par = pblk % _disc.nPoints;
 			residualParticle<StateType, ResidualType, ParamType, wantJac>(t, type, par, secIdx, y, yDot, res, threadLocalMem);
 	}
-	_disc.newStaticJacP = false;
 
 	BENCH_STOP(_timerResidualPar);
 
@@ -1248,6 +1248,14 @@ int GeneralRateModelDG::residualImpl(double t, unsigned int secIdx, StateType co
 		res[i] = y[i];
 	}
 
+	for (int par = 0; par < _disc.nParType * _disc.nPoints; par++) {
+		if (!_jacP[par].isApprox(_jacP[0], 1e-12)) {
+			std::cout << "ParJac not the same for: " << par << std::endl;
+			std::cout << "ParJac: " << _jacP[par] << std::endl;
+		}
+	}
+	//std::cout << _disc.deltaR[0] << std::endl;
+	//std::cout << std::fixed << std::setprecision(5) << "JabPar[0]\n" << _jacP[0].toDense() << std::endl;
 	//Eigen::Map<const VectorXd> y_(reinterpret_cast<const double*>(y), numDofs());
 	//Eigen::Map<VectorXd> res_(reinterpret_cast<double*>(res), numDofs());
 	//Indexer idxr(_disc);
@@ -1341,12 +1349,11 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 {
 	Indexer idxr(_disc);
 
-	// Go to the particle block of the given column node
-	const double* y = reinterpret_cast<const double*>(yBase) + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
-	const double* yDot = yDotBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
-	double* res = reinterpret_cast<double*>(resBase) + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
-
 	LinearBufferAllocator tlmAlloc = threadLocalMem.get();
+
+	// initialize particle residual
+	Eigen::Map<VectorXd> parResidual(reinterpret_cast<double*> (resBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode })), idxr.strideParBlock(parType));
+	parResidual.setZero();
 
 	// Prepare parameters
 	active const* const parDiff = getSectionDependentSlice(_parDiffusion, _disc.nComp * _disc.nParType, secIdx) + parType * _disc.nComp;
@@ -1371,6 +1378,22 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 	// continuing to the last upper diagonal by using the native() method.
 	linalg::BandedEigenSparseRowIterator jac(_jacP[_disc.nParPoints[parType] * parType + colNode], 0);
 
+	// estimate (static) surface and pore diffusion part of particle jaobians if required. Binding part is handled in residual Kernel.
+	if (wantJac && _disc.newStaticJacP[parType * _disc.nCol + colNode]) {
+		// Reset Jacobian
+		double* vPtr = _jacP[_disc.nPoints * parType + colNode].valuePtr();
+		for (int i = 0; i < _jacP[_disc.nPoints * parType + colNode].nonZeros(); i++) {
+			vPtr[i] = 0.0;
+		}
+
+		bool success = calcStaticAnaParticleJacobian(parType, reinterpret_cast<const double* const>(parDiff), reinterpret_cast<const double* const>(parSurfDiff),
+			invBetaP, colNode, t, secIdx, reinterpret_cast<const double* const>(yBase), threadLocalMem);
+		if (cadet_unlikely(!success))
+			LOG(Error) << "Jacobian pattern did not fit the Jacobian estimation for particle block " << parType;
+
+		_disc.newStaticJacP[parType * _disc.nCol + colNode] = false;
+	}
+
 	// not needed for DG ?
 	//active const* const outerSurfPerVol = _parOuterSurfAreaPerVolume.data() + _disc.nParPointsBeforeType[parType];
 	//active const* const innerSurfPerVol = _parInnerSurfAreaPerVolume.data() + _disc.nParPointsBeforeType[parType];
@@ -1383,10 +1406,10 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 	// so we loop over each discrete particle point
 	for (unsigned int par = 0; par < _disc.nParPoints[parType]; ++par)
 	{
-		// residualKernel moves local Pointers to next corresponding entries
-		StateType const* local_y = yBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
-		double const* local_yDot = yDotBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
-		ResidualType* local_res = resBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
+		// local Pointers to current particle node, needed in residualKernel
+		StateType const* local_y = yBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) + par * idxr.strideParShell(parType);
+		double const* local_yDot = yDotBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) + par * idxr.strideParShell(parType);
+		ResidualType* local_res = resBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) + par * idxr.strideParShell(parType);
 
 		// r (particle) coordinate of current node - needed in externally dependent adsorption kinetic
 		const double r = _disc.deltaR[parType] * std::floor(par / _disc.nParNode[parType])
@@ -1397,29 +1420,21 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 		parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandedEigenSparseRowIterator, wantJac, true>(
 			t, secIdx, colPos, local_y, yDotBase ? local_yDot : nullptr, local_res, jac, cellResParams, tlmAlloc
 			);
+		// move rowiterator to next particle node
+		jac += idxr.strideParShell(parType);
 	}
 
 	// We still need to handle transport/diffusion and quasi-stationary reactions
-	// Reset Jacobian
-	if (wantJac && _disc.newStaticJacP) {
-		double* vPtr = _jacP[_disc.nPoints * parType + colNode].valuePtr();
-		for (int i = 0; i < _jacP[_disc.nPoints * parType + colNode].nonZeros(); i++) {
-			vPtr[i] = 0.0;
-		}
-	}
-	// estimate particle jaobians if required
-	if (wantJac && _disc.newStaticJacP) { // ConvDisp static (per section) jacobian
-			bool success = calcStaticAnaParticleJacobian(parType, reinterpret_cast<const double* const>(parDiff), reinterpret_cast<const double* const>(parSurfDiff),
-				invBetaP, colNode, t, secIdx, reinterpret_cast<const double* const>(yBase), threadLocalMem);
-		if (cadet_unlikely(!success))
-			LOG(Error) << "Jacobian pattern did not fit the Jacobian estimation for particle block " << parType;
-
-	}
 
 	// Geometry
 	//@TODO: not needed for DG ?
 	//const ParamType outerAreaPerVolume = static_cast<ParamType>(outerSurfPerVol[par]);
 	//const ParamType innerAreaPerVolume = static_cast<ParamType>(innerSurfPerVol[par]);
+
+	// Go to the particle block of the given column node
+	const double* y = reinterpret_cast<const double*>(yBase) + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
+	const double* yDot = yDotBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
+	double* res = reinterpret_cast<double*>(resBase) + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
 
 	// Mobile and Solid phase RHS
 	for (unsigned int comp = 0; comp < _disc.nComp; comp++)
@@ -1437,20 +1452,24 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 		unsigned int strideCell = _disc.nParNode[parType];
 		unsigned int strideNode = 1u;
 		_disc.g_pSum[parType].setZero();
-		// liquid concentration first
-		// get relevant concentration vector
+		
+		// handle liquid concentration first. get relevant concentration vector
 		Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> c_p(y + comp * idxr.strideParComp(), _disc.nParPoints[parType], InnerStride<Dynamic>(idxr.strideParShell(parType)));
+		
 		// compute g_p = d c_p / d r
 		solve_auxiliary_DG(parType, c_p, strideCell, strideNode);
+		
 		// multiply with dispersion parameter and add to sum 
 		_disc.g_pSum[parType] += _disc.g_p[parType] * dp;
+
 		// handle bound states (with surface diffusion, the residual from the particle equation depends on all bound states)
 		if (_hasSurfaceDiffusion[parType]) {
 			for (int bnd = 0; bnd < _disc.strideBound[parType]; bnd++) {
 				// get relevant concentration vector
-				Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> c_p(y + idxr.strideParLiquid() + bnd, _disc.nParPoints[parType], InnerStride<Dynamic>(idxr.strideParShell(parType)));
+				Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> q_p(y + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd,
+																		_disc.nParPoints[parType], InnerStride<Dynamic>(idxr.strideParShell(parType)));
 				// compute g_s = d c_s / d r
-				solve_auxiliary_DG(parType, c_p, strideCell, strideNode);
+				solve_auxiliary_DG(parType, q_p, strideCell, strideNode);
 				// we also apply the dispersion parameter and inverse beta and then add to auxiliary sum
 				_disc.g_pSum[parType] += _disc.g_p[parType] * static_cast<double>(parSurfDiff[bnd]) * invBetaP[comp];
 			}
@@ -1483,11 +1502,11 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 
 		_disc.g_pSum[parType] *= 2 / _disc.deltaR[parType]; // multiply with inverse mapping
 
-		Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> _g_pSum(&_disc.g_pSum[parType][0], _disc.nParPoints[parType], InnerStride<Dynamic>(0));
+		Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> _g_pSum(&_disc.g_pSum[parType][0], _disc.nParPoints[parType], InnerStride<Dynamic>(1));
 
 		parVolumeIntegral(parType, _g_pSum, resC_p); // adds - D * (g_sum) to the residual
 		
-		surfaceIntegralParticle(parType, _g_pSum, resC_p, strideCell, strideNode); // adds M^-1 B (g_sum - g_sum^*) to the residual
+		parSurfaceIntegral(parType, _g_pSum, resC_p, strideCell, strideNode); // adds M^-1 B (g_sum - g_sum^*) to the residual
 		 
 	}
 
