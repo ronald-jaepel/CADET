@@ -9,7 +9,8 @@
 //  your option, any later version) which accompanies this distribution, and
 //  is available at http://www.gnu.org/licenses/gpl.html
 // =============================================================================
-
+//TODO: delete iostream
+#include <iostream>
 /**
  * @file 
  * Defines the general rate model (GRM).
@@ -326,7 +327,7 @@ protected:
 		std::vector<bool> isKinetic;
 
 		bool newStaticJac; //!< determines wether static analytical jacobian needs to be computed (every section)
-		bool newStaticJacP; //!< determines wether static analytical jacobian needs to be computed (every section)
+		bool* newStaticJacP; //!< determines wether static analytical jacobian needs to be computed (every section)
 
 		/**
 		* @brief computes LGL nodes, integration weights, polynomial derivative matrix
@@ -352,6 +353,8 @@ protected:
 			boundary.setZero();
 			surfaceFlux.resize(nCol + 1);
 			surfaceFlux.setZero();
+			newStaticJac = true;
+
 			// particle
 			nParNode = new unsigned int [nParType];
 			nParPoints = new unsigned int [nParType];
@@ -362,6 +365,7 @@ protected:
 			parInvWeights = new VectorXd [nParType];
 			parPolyDerM = new MatrixXd [nParType];
 			parInvMM = new MatrixXd [nParType];
+			newStaticJacP = new bool [nParType * nCol];
 			for (int parType = 0; parType < nParType; parType++) {
 				nParNode[parType] = parPolyDeg[parType] + 1u;
 				nParPoints[parType] = nParNode[parType] * nParCell[parType];
@@ -380,10 +384,10 @@ protected:
 				parPolyDerM[parType].setZero();
 				parInvMM[parType].resize(nParNode[parType], nParNode[parType]);
 				parInvMM[parType].setZero();
+				for (int colNode = 0; colNode < nCol; colNode++) {
+					newStaticJacP[parType * nCol + colNode] = true;
+				}
 			}
-
-			newStaticJac = true;
-			newStaticJacP = true;
 
 			// @TODO: make exact, inexact integration switch during calculation possible?
 			// compute DG operators for bulk and every particle
@@ -856,7 +860,9 @@ protected:
 
 			_disc.curSection = secIdx;
 			_disc.newStaticJac = true;
-			_disc.newStaticJacP = true;
+			for (int par = 0; par < _disc.nCol * _disc.nParType; par++) {
+				_disc.newStaticJacP[par] = true;
+			}
 
 			// update velocity and dispersion
 			_disc.velocity = static_cast<double>(_convDispOpB.currentVelocity());
@@ -1020,7 +1026,7 @@ protected:
 			}
 		}
 	}
-	void surfaceIntegralParticle(int parType, Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>>& state,
+	void parSurfaceIntegral(int parType, Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>>& state,
 		Eigen::Map<VectorXd, 0, InnerStride<Dynamic>>& stateDer, unsigned int strideCell, unsigned int strideNode) {
 
 		// calc numerical flux values
@@ -1031,9 +1037,9 @@ protected:
 				for (unsigned int Node = 0; Node < _disc.nParNode[parType]; Node++) {
 					stateDer[Cell * strideCell + Node * strideNode]
 						-= _disc.invMM(Node, 0) * (state[Cell * strideCell]
-							- _disc.surfaceFlux[Cell])
+							- _disc.surfaceFluxParticle[parType][Cell])
 						- _disc.invMM(Node, _disc.parPolyDeg[parType]) * (state[Cell * strideCell + _disc.parPolyDeg[parType] * strideNode]
-							- _disc.surfaceFlux[(Cell + 1u)]);
+							- _disc.surfaceFluxParticle[parType][(Cell + 1u)]);
 				}
 			}
 		}
@@ -1042,10 +1048,10 @@ protected:
 				// strong surface integral -> M^-1 B [state - state*]
 				stateDer[Cell * strideCell] // first cell node
 					-= _disc.invWeights[0] * (state[Cell * strideCell] // first node
-						- _disc.surfaceFlux(Cell));
+						- _disc.surfaceFluxParticle[parType][Cell]);
 				stateDer[Cell * strideCell + _disc.parPolyDeg[parType] * strideNode] // last cell node
 					+= _disc.invWeights[_disc.parPolyDeg[parType]] * (state[Cell * strideCell + _disc.parPolyDeg[parType] * strideNode]
-						- _disc.surfaceFlux(Cell + 1u));
+						- _disc.surfaceFluxParticle[parType][Cell + 1u]);
 			}
 		}
 	}
@@ -1145,7 +1151,7 @@ protected:
 		// DG volumne integral: - D c
 		parVolumeIntegral(parType, conc, g_p);
 		// surface integral: M^-1 B [c - c^*]
-		surfaceIntegralParticle(parType, conc, g_p, strideCell, strideNode);
+		parSurfaceIntegral(parType, conc, g_p, strideCell, strideNode);
 		// inverse mapping from reference space and auxiliary factor -1
 		g_p *= - 2.0 / _disc.deltaR[parType];
 
@@ -1181,9 +1187,11 @@ protected:
 		tripletList.reserve(calcParDispNNZ(parType, _disc));
 
 		if (!_disc.parModal[parType])
-			calcNodalParticleJacobianPattern(parType, tripletList, mat);
+			calcNodalParticleJacobianPattern(parType, tripletList);
 		//else
 			//calcModalParticleJacobianPattern(parType, tripletList, mat);
+
+		isothermPattern(parType, tripletList);
 
 		mat.setFromTriplets(tripletList.begin(), tripletList.end());
 
@@ -1522,7 +1530,7 @@ protected:
 	/**
 	 * @brief calculates the particle dispersion jacobian Pattern of the nodal DG scheme for one particle type and bead
 	*/
-	void calcNodalParticleJacobianPattern(unsigned int parType, std::vector<T>& tripletList, Eigen::SparseMatrix<double, RowMajor>& jacP) {
+	void calcNodalParticleJacobianPattern(unsigned int parType, std::vector<T>& tripletList) {
 
 		// (global) strides
 		Indexer idxr(_disc);
@@ -1542,7 +1550,7 @@ protected:
 						// col: add component offset and go node strides from there for each dispersion block entry
 						tripletList.push_back(T(comp * sComp + i * sNode,
 											    comp * sComp + j * sNode,
-							1.0));
+							0.0));
 
 						// handle bound states: surface diffusion
 						if (_hasSurfaceDiffusion[parType]) {
@@ -1553,7 +1561,7 @@ protected:
 							//		and go node strides from there for each dispersion block entry
 							tripletList.push_back(T(comp * sComp + i * sNode,
 													idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode,
-								2.0));
+								0.0));
 							}
 						}
 					}
@@ -1564,7 +1572,7 @@ protected:
 						for (int conc = 0; conc < sNode; conc++) {
 							tripletList.push_back(T(comp * sComp + i * sNode + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd,
 													i * sNode + conc,
-								3.0));
+								0.0));
 						}
 					}
 				}
@@ -1584,6 +1592,29 @@ protected:
 
 
 		}
+	}
+
+	/**
+	* @brief adds the sparsity pattern of the isotherm Jacobian
+	* @detail Independent of the isotherm, all liquid and solid entries (so all entries, the isotherm could theoretically depend on) at a discrete point are set.
+	*/
+	void isothermPattern(int parType, std::vector<T>& tripletList) {
+
+		Indexer idxr(_disc);
+
+		// loop over all discrete points and solid states and add all liquid plus solid entries at that solid state at that discrete point
+		for (unsigned int point = 0; point < _disc.nParPoints[parType]; point++) {
+			for (unsigned int solid = 0; solid < _disc.strideBound[parType]; solid++) {
+				for (unsigned int conc = 0; conc < _disc.nComp + _disc.strideBound[parType]; conc++) {
+					// row:		  jump over previous discrete points and liquid concentration and add the offset of the current bound state
+					// column:    jump over previous discrete points. add entries for all liquid and bound concentrations (conc)
+					tripletList.push_back(T(idxr.strideParShell(parType) * point + idxr.strideParLiquid() + solid,
+											idxr.strideParShell(parType) * point + conc,
+						0.0));
+				}
+			}
+		}
+
 	}
 
 	/**
@@ -1632,7 +1663,7 @@ protected:
 		double invMap = (2.0 / _disc.deltaR[parType]);
 		Eigen::MatrixXd B = MatrixXd::Zero(_disc.nParNode[parType], _disc.nParNode[parType]);
 		B(0, 0) = -1.0; B(_disc.nParNode[parType] - 1, _disc.nParNode[parType] - 1) = 1.0;
-		Eigen::MatrixXd invMM = MatrixXd::Identity(_disc.nParNode[parType], _disc.nParNode[parType]) * _disc.parInvWeights[parType];
+		Eigen::MatrixXd invMM = _disc.parInvWeights[parType].asDiagonal();
 		Eigen::MatrixXd M_1M_rD = MatrixXd::Zero(_disc.nParNode[parType], _disc.nParNode[parType]);
 
 		// special case: one cell -> diffBlock \in R^(nParNodes x nParNodes), GBlock = parPolyDerM
