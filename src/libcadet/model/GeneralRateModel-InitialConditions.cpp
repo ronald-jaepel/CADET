@@ -1878,6 +1878,10 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 				// Refine / correct solution
 				_binding[type]->postConsistentInitialState(simTime.t, simTime.secIdx, colPos, qShell, qShell - idxr.strideParLiquid(), tlmAlloc);
 			}
+
+			// reset particle jacobian
+			setParDispJacPattern(type, _jacPdisc[type * _disc.nPoints + pblk]);
+
 		} CADET_PARFOR_END;
 	}
 
@@ -1987,7 +1991,7 @@ void GeneralRateModelDG::consistentInitialTimeDerivative(const SimulationTime& s
 		for (int k = 0; k < mat.nonZeros(); k++) {
 			vPtr[k] = 0.0;
 		}
-		
+
 		linalg::BandedEigenSparseRowIterator jac(mat, 0);
 
 		LinearBufferAllocator tlmAlloc = threadLocalMem.get();
@@ -2038,7 +2042,7 @@ void GeneralRateModelDG::consistentInitialTimeDerivative(const SimulationTime& s
 		}
 
 		// Solve
-		Eigen::Map<VectorXd> r(vecStateYdot + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }), _disc.nParPoints[type]);
+		Eigen::Map<VectorXd> r(vecStateYdot + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }), static_cast<int>(_disc.nParPoints[type]) * idxr.strideParShell(type));
 		_parSolver[type * _disc.nPoints + par].solve(r);
 		if (_parSolver[type * _disc.nPoints + par].info() != Eigen::Success)
 		{
