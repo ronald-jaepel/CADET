@@ -1685,7 +1685,7 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 
 				// r (particle) coordinate of current node
 				const double r = _disc.deltaR[type] * std::floor(shell / _disc.nParNode[type])
-					+ 0.5 * _disc.deltaR[type] * (1 + _disc.nodes[shell % _disc.nParNode[type]]);
+					+ 0.5 * _disc.deltaR[type] * (1 + _disc.parNodes[type][shell % _disc.nParNode[type]]);
 				const ColumnPosition colPos{ z, 0.0, r };
 
 				// Determine whether nonlinear solver is required
@@ -2018,7 +2018,7 @@ void GeneralRateModelDG::consistentInitialTimeDerivative(const SimulationTime& s
 			{
 				// r (particle) coordinate of current node
 				const double r = _disc.deltaR[type] * std::floor(par / _disc.nParNode[type])
-					+ 0.5 * _disc.deltaR[type] * (1 + _disc.nodes[par % _disc.nParNode[type]]);
+					+ 0.5 * _disc.deltaR[type] * (1 + _disc.parNodes[type][par % _disc.nParNode[type]]);
 				_binding[type]->timeDerivativeQuasiStationaryFluxes(simTime.t, simTime.secIdx,
 					ColumnPosition{ z, 0.0, r}, qShellDot - _disc.nComp, qShellDot, dFluxDt, tlmAlloc);
 			}
@@ -2143,7 +2143,7 @@ void GeneralRateModelDG::leanConsistentInitialState(const SimulationTime& simTim
 					double* const qShell = vecStateY + localOffsetToParticle + localOffsetInParticle;
 					// r (particle) coordinate of current node
 					const double r = _disc.deltaR[type] * std::floor(shell / _disc.nParNode[type])
-						+ 0.5 * _disc.deltaR[type] * (1 + _disc.nodes[shell % _disc.nParNode[type]]);
+						+ 0.5 * _disc.deltaR[type] * (1 + _disc.parNodes[type][shell % _disc.nParNode[type]]);
 					const ColumnPosition colPos{ z, 0.0, r};
 
 					// Perform consistent initialization that does not require a full fledged nonlinear solver (that may fail or damage the current state vector)

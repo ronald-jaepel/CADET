@@ -836,7 +836,7 @@ protected:
 		{
 			for (unsigned int par = 0; par < _disc.nParPoints[parType]; par++)
 				coords[par] = _disc.deltaR[parType] * std::floor(par / _disc.nParNode[parType])
-				+ 0.5 * _disc.deltaR[parType] * (1 + _disc.nodes[par % _disc.nParNode[parType]]);;
+				+ 0.5 * _disc.deltaR[parType] * (1.0 + _disc.parNodes[parType][par % _disc.nParNode[parType]]);;
 		}
 
 	protected:
@@ -1688,11 +1688,11 @@ protected:
 						// row: add component offset and go node strides from there for each dispersion block entry
 						// col: add component offset and go node strides from there for each dispersion block entry
 						jacP.coeffRef(comp * sComp + i * sNode,
-									  comp * sComp + j * sNode)
+							comp * sComp + j * sNode)
 							= -(invMap * diff[0])
 							* (M_1M_rD(i, j) + dispBlock(i, j)); // diffBlock += invMap* D_p * (M^-1 * M_r * D + invMap * (D * D - M^-1 * B * D))
 
-						// handle bound states
+		// handle bound states
 						for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
 							// row: add bound state offset and go node strides from there for each dispersion block entry
 							// col: add bound state offset and go node strides from there for each dispersion block entry
