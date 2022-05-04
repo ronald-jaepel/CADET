@@ -1242,7 +1242,7 @@ int GeneralRateModelDG::residualImpl(double t, unsigned int secIdx, StateType co
 
 	residualFlux<StateType, ResidualType, ParamType>(t, secIdx, y, yDot, res);
 
-	// Handle inlet DOFs, which are simply copied to res
+	// Handle inlet DOFs, which are simply copied to the residual
 	for (unsigned int i = 0; i < _disc.nComp; ++i)
 	{
 		res[i] = y[i];
@@ -1254,8 +1254,7 @@ int GeneralRateModelDG::residualImpl(double t, unsigned int secIdx, StateType co
 			std::cout << "ParJac: " << _jacP[par] << std::endl;
 		}
 	}
-	//std::cout << _disc.deltaR[0] << std::endl;
-	//std::cout << std::fixed << std::setprecision(5) << "JabPar[0]\n" << _jacP[0].toDense() << std::endl;
+
 	//Eigen::Map<const VectorXd> y_(reinterpret_cast<const double*>(y), numDofs());
 	//Eigen::Map<VectorXd> res_(reinterpret_cast<double*>(res), numDofs());
 	//Indexer idxr(_disc);
@@ -1398,6 +1397,7 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 	//active const* const outerSurfPerVol = _parOuterSurfAreaPerVolume.data() + _disc.nParPointsBeforeType[parType];
 	//active const* const innerSurfPerVol = _parInnerSurfAreaPerVolume.data() + _disc.nParPointsBeforeType[parType];
 	//active const* const parCenterRadius = _parCenterRadius.data() + _disc.nParCellsBeforeType[parType];
+	//std::cout << "res_prev\n" << parResidual << std::endl;
 
 	int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 	const parts::cell::CellParameters cellResParams = makeCellResidualParams(parType, qsReaction);
@@ -1413,13 +1413,14 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 
 		// r (particle) coordinate of current node - needed in externally dependent adsorption kinetic
 		const double r = _disc.deltaR[parType] * std::floor(par / _disc.nParNode[parType])
-			+ 0.5 * _disc.deltaR[parType] * (1 + _disc.nodes[par % _disc.nParNode[parType]]);
+			+ 0.5 * _disc.deltaR[parType] * (1 + _disc.parNodes[parType][par % _disc.nParNode[parType]]);
 		const ColumnPosition colPos{ z, 0.0, r };
 
 		// Handle time derivatives, binding, dynamic reactions
 		parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandedEigenSparseRowIterator, wantJac, true>(
 			t, secIdx, colPos, local_y, yDotBase ? local_yDot : nullptr, local_res, jac, cellResParams, tlmAlloc
 			);
+
 		// move rowiterator to next particle node
 		jac += idxr.strideParShell(parType);
 	}
@@ -1436,7 +1437,7 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 	const double* yDot = yDotBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
 	double* res = reinterpret_cast<double*>(resBase) + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
 
-	// Mobile and Solid phase RHS
+	// Mobile phase RHS
 	for (unsigned int comp = 0; comp < _disc.nComp; comp++)
 	{
 		const unsigned int nBound = _disc.nBound[_disc.nComp * parType + comp];
@@ -1462,6 +1463,11 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 		// multiply with dispersion parameter and add to sum 
 		_disc.g_pSum[parType] += _disc.g_p[parType] * dp;
 
+		//std::cout << "c_p\n" << c_p << std::endl;
+		//std::cout << "D\n" << _disc.parPolyDerM[parType] << std::endl;
+		//std::cout << "g_sum\n" << _disc.g_pSum[parType] << std::endl;
+
+
 		// handle bound states (with surface diffusion, the residual from the particle equation depends on all bound states)
 		if (_hasSurfaceDiffusion[parType]) {
 			for (int bnd = 0; bnd < _disc.strideBound[parType]; bnd++) {
@@ -1475,7 +1481,7 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 			}
 		}
 		// ====================================================================================//
-		// solve (metric) part of RHS M^-1 M_r g_pSum										   //
+		// solve first/metric part of RHS: M^-1 M_r g_pSum									   //
 		// ====================================================================================//
 
 		Eigen::Map<VectorXd, 0, InnerStride<Dynamic>> resC_p(res + comp * idxr.strideParComp(), _disc.nParPoints[parType], InnerStride<Dynamic>(idxr.strideParShell(parType)));
@@ -1486,7 +1492,7 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 				double r_L = static_cast<double>(_parRadius[parType]) - cell * _disc.deltaR[parType]; // left boundary of current cell
 
 				for (int node = 0; node < static_cast<int>(_disc.nParNode[parType]); node++) {
-					double fac = 0.5 * ((_disc.deltaR[parType] / 2.0) * (_disc.parNodes[parType][node] + 1.0) + r_L); // -> diag(M^-1 * M_r)
+					double fac = 2.0 / (r_L + (_disc.deltaR[parType] / 2.0) * (_disc.parNodes[parType][node] + 1.0)); // -> diag(M^-1 * M_r)
 					// substract RHS
 					resC_p[cell * _disc.nParNode[parType] + node] -= fac * _disc.g_pSum[parType][cell * _disc.nParNode[parType] + node];
 				}
@@ -1503,11 +1509,13 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 		_disc.g_pSum[parType] *= 2 / _disc.deltaR[parType]; // multiply with inverse mapping
 
 		Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> _g_pSum(&_disc.g_pSum[parType][0], _disc.nParPoints[parType], InnerStride<Dynamic>(1));
+		//std::cout << "res_prev\n" << resC_p << std::endl;
 
 		parVolumeIntegral(parType, _g_pSum, resC_p); // adds - D * (g_sum) to the residual
-		
-		parSurfaceIntegral(parType, _g_pSum, resC_p, strideCell, strideNode); // adds M^-1 B (g_sum - g_sum^*) to the residual
-		 
+
+		parSurfaceIntegral(parType, _g_pSum, resC_p, strideCell, strideNode, aux); // adds M^-1 B (g_sum - g_sum^*) to the residual
+		//std::cout << "res_after\n" << resC_p << std::endl;
+
 	}
 
 	return 0;
@@ -1532,7 +1540,7 @@ int GeneralRateModelDG::residualFlux(double t, unsigned int secIdx, StateType co
 		resFlux[i] = yFlux[i];
 
 	// Discretized film diffusion kf
-	ParamType* const kf_FV = _discParFlux.create<ParamType>(_disc.nComp);
+	ParamType* const kf = _discParFlux.create<ParamType>(_disc.nComp);
 
 	for (unsigned int type = 0; type < _disc.nParType; ++type)
 	{
@@ -1554,27 +1562,27 @@ int GeneralRateModelDG::residualFlux(double t, unsigned int secIdx, StateType co
 		const ParamType outerAreaPerVolume = static_cast<ParamType>(_parOuterSurfAreaPerVolume[_disc.nParPointsBeforeType[type]]);
 
 		const ParamType jacCF_val = invBetaC * surfaceToVolumeRatio;
-		const ParamType jacPF_val = -outerAreaPerVolume / epsP;
+		const ParamType jacPF_val = -1.0 / epsP; // -outerAreaPerVolume / epsP; @TODO: why?
 
-		//// Discretized film diffusion kf for finite volumes // @TODO: why?
+		// Discretized film diffusion kf for finite volumes // @TODO: why?
 		//if (cadet_likely(_colParBoundaryOrder == 2))
 		//{
-		//	const ParamType absOuterShellHalfRadius = 0.5 * static_cast<ParamType>(_parCellSize[_disc.nParCellsBeforeType[type]]);
+		//	const ParamType absOuterShellHalfRadius = 0.5 * static_cast<ParamType>(_parCellSize[_disc.nParPointsBeforeType[type]]);
 		//	for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-		//		kf_FV[comp] = 1.0 / (absOuterShellHalfRadius / epsP / static_cast<ParamType>(_poreAccessFactor[type * _disc.nComp + comp]) / static_cast<ParamType>(parDiff[comp]) + 1.0 / static_cast<ParamType>(filmDiff[comp]));
+		//		kf[comp] = 1.0 / (absOuterShellHalfRadius / epsP / static_cast<ParamType>(_poreAccessFactor[type * _disc.nComp + comp]) / static_cast<ParamType>(parDiff[comp]) + 1.0 / static_cast<ParamType>(filmDiff[comp]));
 		//}
 		//else
 		//{
 			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-				kf_FV[comp] = static_cast<ParamType>(filmDiff[comp]);
+				kf[comp] = static_cast<ParamType>(filmDiff[comp]);
 		//}
 
 		// J_{0,f} block, adds flux to column void / bulk volume equations
 		for (unsigned int i = 0; i < _disc.nPoints * _disc.nComp; ++i)
 		{
-			const unsigned int colCell = i / _disc.nComp;
-			// + 1/Beta_c d_j * (k_f * [c_l - c_p])
-			resCol[i] += jacCF_val * static_cast<ParamType>(_parTypeVolFrac[type + colCell * _disc.nParType]) * yFluxType[i];
+			const unsigned int colNode = i / _disc.nComp;
+			// + 1/Beta_c d_j * (surfaceToVolumeRatio_pj) * (k_f * [c_l - c_p])
+			resCol[i] += jacCF_val* static_cast<ParamType>(_parTypeVolFrac[type + colNode * _disc.nParType])* yFluxType[i];
 		}
 
 		// J_{f,0} block, adds bulk volume state c_i to flux equation
@@ -1583,7 +1591,7 @@ int GeneralRateModelDG::residualFlux(double t, unsigned int secIdx, StateType co
 			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
 			{
 				const unsigned int eq = bnd * idxr.strideColNode() + comp * idxr.strideColComp();
-				resFluxType[eq] -= kf_FV[comp] * yCol[eq];
+				resFluxType[eq] -= kf[comp] * yCol[eq];
 			}
 		}
 
@@ -1593,7 +1601,7 @@ int GeneralRateModelDG::residualFlux(double t, unsigned int secIdx, StateType co
 			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
 			{
 				const unsigned int eq = pblk * idxr.strideColNode() + comp * idxr.strideColComp();
-				// Beta_p / F_acc * (k_f * [c_l - c_p])
+				// + (1 / (eps_p * F_acc)) * (k_f * [c_l - c_p])
 				resParType[pblk * idxr.strideParBlock(type) + comp] += jacPF_val / static_cast<ParamType>(_poreAccessFactor[type * _disc.nComp + comp]) * yFluxType[eq];
 			}
 		}
@@ -1604,57 +1612,58 @@ int GeneralRateModelDG::residualFlux(double t, unsigned int secIdx, StateType co
 			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
 			{
 				const unsigned int eq = pblk * idxr.strideColNode() + comp * idxr.strideColComp();
-				resFluxType[eq] += kf_FV[comp] * yParType[comp + pblk * idxr.strideParBlock(type)];
+				resFluxType[eq] += kf[comp] * yParType[comp + pblk * idxr.strideParBlock(type)];
 			}
 		}
 
-		if (cadet_unlikely(_hasSurfaceDiffusion[type] && _binding[type]->hasQuasiStationaryReactions() && (_disc.nParCell[type] > 1)))
-		{
-			int const* const qsReaction = _binding[type]->reactionQuasiStationarity();
+		// @TODO: why?
+		//if (cadet_unlikely(_hasSurfaceDiffusion[type] && _binding[type]->hasQuasiStationaryReactions() && (_disc.nParCell[type] > 1)))
+		//{
+		//	int const* const qsReaction = _binding[type]->reactionQuasiStationarity();
 
-			// Ordering of particle surface diffusion:
-			// bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2
-			active const* const parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[type];
-			active const* const parCenterRadius = _parCenterRadius.data() + _disc.nParPointsBeforeType[type];
-			const ParamType absOuterShellHalfRadius = 0.5 * static_cast<ParamType>(_parCellSize[_disc.nParPointsBeforeType[type]]);
+		//	// Ordering of particle surface diffusion:
+		//	// bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2
+		//	active const* const parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[type];
+		//	active const* const parCenterRadius = _parCenterRadius.data() + _disc.nParPointsBeforeType[type];
+		//	const ParamType absOuterShellHalfRadius = 0.5 * static_cast<ParamType>(_parCellSize[_disc.nParPointsBeforeType[type]]);
 
-			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-				kf_FV[comp] = (1.0 - static_cast<ParamType>(_parPorosity[type])) / (1.0 + epsP * static_cast<ParamType>(_poreAccessFactor[type * _disc.nComp + comp]) * static_cast<ParamType>(parDiff[comp]) / (absOuterShellHalfRadius * static_cast<ParamType>(filmDiff[comp])));
+		//	for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
+		//		kf[comp] = (1.0 - static_cast<ParamType>(_parPorosity[type])) / (1.0 + epsP * static_cast<ParamType>(_poreAccessFactor[type * _disc.nComp + comp]) * static_cast<ParamType>(parDiff[comp]) / (absOuterShellHalfRadius * static_cast<ParamType>(filmDiff[comp])));
 
-			for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
-			{
-				const ColumnPosition colPos{ _disc.deltaZ * std::floor(pblk / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes]), 0.0, static_cast<double>(parCenterRadius[0]) / static_cast<double>(_parRadius[type])};
-				const ParamType dr = static_cast<ParamType>(parCenterRadius[0]) - static_cast<ParamType>(parCenterRadius[1]);
+		//	for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
+		//	{
+		//		const ColumnPosition colPos{ _disc.deltaZ * std::floor(pblk / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes]), 0.0, static_cast<double>(parCenterRadius[0]) / static_cast<double>(_parRadius[type])};
+		//		const ParamType dr = static_cast<ParamType>(parCenterRadius[0]) - static_cast<ParamType>(parCenterRadius[1]);
 
-				for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-				{
-					const unsigned int eq = pblk * idxr.strideColNode() + comp * idxr.strideColComp();
-					const unsigned int nBound = _disc.nBound[_disc.nComp * type + comp];
+		//		for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
+		//		{
+		//			const unsigned int eq = pblk * idxr.strideColNode() + comp * idxr.strideColComp();
+		//			const unsigned int nBound = _disc.nBound[_disc.nComp * type + comp];
 
-					for (unsigned int i = 0; i < nBound; ++i)
-					{
-						const int idxBnd = idxr.offsetBoundComp(ParticleTypeIndex{type}, ComponentIndex{comp}) + i;
+		//			for (unsigned int i = 0; i < nBound; ++i)
+		//			{
+		//				const int idxBnd = idxr.offsetBoundComp(ParticleTypeIndex{type}, ComponentIndex{comp}) + i;
 
-						// Skip quasi-stationary bound states
-						if (!qsReaction[idxBnd])
-							continue;
+		//				// Skip quasi-stationary bound states
+		//				if (!qsReaction[idxBnd])
+		//					continue;
 
-						// Evaluate surface diffusion coefficient and apply weighted arithmetic mean
-						const int curIdx = pblk * idxr.strideParBlock(type) + idxr.strideParLiquid() + idxBnd;
-						const auto localSurfDiff = cadet_unlikely(_parDepSurfDiffusion[type]) ? _parDepSurfDiffusion[type]->combinedParameterSolid(
-							colPos,
-							static_cast<ParamType>(parSurfDiff[idxBnd]),
-							yParType + pblk * idxr.strideParBlock(type),
-							yParType + pblk * idxr.strideParBlock(type) + idxr.strideParLiquid(),
-							idxBnd
-						) : static_cast<ParamType>(parSurfDiff[idxBnd]);
+		//				// Evaluate surface diffusion coefficient and apply weighted arithmetic mean
+		//				const int curIdx = pblk * idxr.strideParBlock(type) + idxr.strideParLiquid() + idxBnd;
+		//				const auto localSurfDiff = cadet_unlikely(_parDepSurfDiffusion[type]) ? _parDepSurfDiffusion[type]->combinedParameterSolid(
+		//					colPos,
+		//					static_cast<ParamType>(parSurfDiff[idxBnd]),
+		//					yParType + pblk * idxr.strideParBlock(type),
+		//					yParType + pblk * idxr.strideParBlock(type) + idxr.strideParLiquid(),
+		//					idxBnd
+		//				) : static_cast<ParamType>(parSurfDiff[idxBnd]);
 
-						const ResidualType gradQ = (yParType[curIdx] - yParType[curIdx + idxr.strideParShell(type)]) / dr;
-						resFluxType[eq] -= kf_FV[comp] * localSurfDiff * gradQ;
-					}
-				}
-			}
-		}
+		//				const ResidualType gradQ = (yParType[curIdx] - yParType[curIdx + idxr.strideParShell(type)]) / dr;
+		//				resFluxType[eq] -= kf[comp] * localSurfDiff * gradQ;
+		//			}
+		//		}
+		//	}
+		//}
 	}
 
 	_discParFlux.destroy<ParamType>();
@@ -1703,7 +1712,7 @@ void GeneralRateModelDG::assembleOffdiagJac(double t, unsigned int secIdx, doubl
 	const double invBetaC = 1.0 / static_cast<double>(_colPorosity) - 1.0;
 
 	// Discretized film diffusion kf for finite volumes
-	double* const kf_FV = _discParFlux.create<double>(_disc.nComp);
+	double* const kf = _discParFlux.create<double>(_disc.nComp);
 
 	for (unsigned int type = 0; type < _disc.nParType; ++type)
 	{
@@ -1720,28 +1729,28 @@ void GeneralRateModelDG::assembleOffdiagJac(double t, unsigned int secIdx, doubl
 		const double outerAreaPerVolume = static_cast<double>(_parOuterSurfAreaPerVolume[_disc.nParPointsBeforeType[type]]);
 
 		const double jacCF_val = invBetaC * surfaceToVolumeRatio;
-		const double jacPF_val = -outerAreaPerVolume / epsP;
+		const double jacPF_val = -1.0 / epsP; // -outerAreaPerVolume / epsP; // @TODO: FV specific?
 
 		// Discretized film diffusion kf for finite volumes
-		if (cadet_likely(_colParBoundaryOrder == 2))
+		if (cadet_likely(_colParBoundaryOrder == 2)) // @TODO: why?
 		{
 			const double absOuterShellHalfRadius = 0.5 * static_cast<double>(_parCellSize[_disc.nParPointsBeforeType[type]]);
 			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-				kf_FV[comp] = 1.0 / (absOuterShellHalfRadius / epsP / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]) / static_cast<double>(parDiff[comp]) + 1.0 / static_cast<double>(filmDiff[comp]));
+				kf[comp] = 1.0 / (absOuterShellHalfRadius / epsP / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]) / static_cast<double>(parDiff[comp]) + 1.0 / static_cast<double>(filmDiff[comp]));
 		}
 		else
 		{
 			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-				kf_FV[comp] = static_cast<double>(filmDiff[comp]);
+				kf[comp] = static_cast<double>(filmDiff[comp]);
 		}
 
 		// J_{0,f} block, adds flux to column void / bulk volume equations
 		for (unsigned int eq = 0; eq < _disc.nPoints * _disc.nComp; ++eq)
 		{
-			const unsigned int colCell = eq / _disc.nComp;
+			const unsigned int colNode = eq / _disc.nComp;
 
 			// Main diagonal corresponds to j_{f,i} (flux) state variable
-			_jacCF.addElement(eq, eq + typeOffset, jacCF_val * static_cast<double>(_parTypeVolFrac[type + colCell * _disc.nParType]));
+			_jacCF.addElement(eq, eq + typeOffset, jacCF_val * static_cast<double>(_parTypeVolFrac[type + colNode * _disc.nParType]));
 		}
 
 		// J_{f,0} block, adds bulk volume state c_i to flux equation
@@ -1751,7 +1760,7 @@ void GeneralRateModelDG::assembleOffdiagJac(double t, unsigned int secIdx, doubl
 			{
 				// Main diagonal corresponds to c_i state variable in each column cell
 				const unsigned int eq = point * idxr.strideColNode() + comp * idxr.strideColComp();
-				_jacFC.addElement(eq + typeOffset, eq, -kf_FV[comp]);
+				_jacFC.addElement(eq + typeOffset, eq, -kf[comp]);
 			}
 		}
 
@@ -1773,84 +1782,85 @@ void GeneralRateModelDG::assembleOffdiagJac(double t, unsigned int secIdx, doubl
 			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
 			{
 				const unsigned int eq = typeOffset + pblk * idxr.strideColNode() + comp * idxr.strideColComp();
-				jacFPtype[pblk].addElement(eq, comp, kf_FV[comp]);
+				jacFPtype[pblk].addElement(eq, comp, kf[comp]);
 			}
 		}
 
-		if (cadet_unlikely(_hasSurfaceDiffusion[type] && _binding[type]->hasQuasiStationaryReactions() && (_disc.nParCell[type] > 1)))
-		{
-			int const* const qsReaction = _binding[type]->reactionQuasiStationarity();
+		// @TODO: why?
+		//if (cadet_unlikely(_hasSurfaceDiffusion[type] && _binding[type]->hasQuasiStationaryReactions() && (_disc.nParCell[type] > 1)))
+		//{
+		//	int const* const qsReaction = _binding[type]->reactionQuasiStationarity();
 
-			// Ordering of particle surface diffusion:
-			// bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2
-			active const* const parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[type];
-			active const* const parCenterRadius = _parCenterRadius.data() + _disc.nParPointsBeforeType[type];
-			const double absOuterShellHalfRadius = 0.5 * static_cast<double>(_parCellSize[_disc.nParPointsBeforeType[type]]);
+		//	// Ordering of particle surface diffusion:
+		//	// bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2
+		//	active const* const parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[type];
+		//	active const* const parCenterRadius = _parCenterRadius.data() + _disc.nParPointsBeforeType[type];
+		//	const double absOuterShellHalfRadius = 0.5 * static_cast<double>(_parCellSize[_disc.nParPointsBeforeType[type]]);
 
-			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-				kf_FV[comp] = (1.0 - static_cast<double>(_parPorosity[type])) / (1.0 + epsP * static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]) * static_cast<double>(parDiff[comp]) / (absOuterShellHalfRadius * static_cast<double>(filmDiff[comp])));
+		//	for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
+		//		kf[comp] = (1.0 - static_cast<double>(_parPorosity[type])) / (1.0 + epsP * static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]) * static_cast<double>(parDiff[comp]) / (absOuterShellHalfRadius * static_cast<double>(filmDiff[comp])));
 
-			for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
-			{
-				const ColumnPosition colPos{(0.5 + static_cast<double>(pblk)) / static_cast<double>(_disc.nPoints), 0.0, static_cast<double>(parCenterRadius[0]) / static_cast<double>(_parRadius[type])};
-				const double dr = static_cast<double>(parCenterRadius[0]) - static_cast<double>(parCenterRadius[1]);
+		//	for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
+		//	{
+		//		const ColumnPosition colPos{(0.5 + static_cast<double>(pblk)) / static_cast<double>(_disc.nPoints), 0.0, static_cast<double>(parCenterRadius[0]) / static_cast<double>(_parRadius[type])};
+		//		const double dr = static_cast<double>(parCenterRadius[0]) - static_cast<double>(parCenterRadius[1]);
 
-				double const* const yCell = vecStateY + idxr.offsetCp(ParticleTypeIndex{type}, ParticleIndex{pblk});
+		//		double const* const yCell = vecStateY + idxr.offsetCp(ParticleTypeIndex{type}, ParticleIndex{pblk});
 
-				for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-				{
-					const unsigned int eq = typeOffset + pblk * idxr.strideColNode() + comp * idxr.strideColComp();
-					const unsigned int nBound = _disc.nBound[_disc.nComp * type + comp];
+		//		for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
+		//		{
+		//			const unsigned int eq = typeOffset + pblk * idxr.strideColNode() + comp * idxr.strideColComp();
+		//			const unsigned int nBound = _disc.nBound[_disc.nComp * type + comp];
 
-					for (unsigned int i = 0; i < nBound; ++i)
-					{
-						const int idxBnd = idxr.offsetBoundComp(ParticleTypeIndex{type}, ComponentIndex{comp}) + i;
+		//			for (unsigned int i = 0; i < nBound; ++i)
+		//			{
+		//				const int idxBnd = idxr.offsetBoundComp(ParticleTypeIndex{type}, ComponentIndex{comp}) + i;
 
-						// Skip quasi-stationary bound states
-						if (!qsReaction[idxBnd])
-							continue;
+		//				// Skip quasi-stationary bound states
+		//				if (!qsReaction[idxBnd])
+		//					continue;
 
-						if (cadet_unlikely(_parDepSurfDiffusion[type]))
-						{
-							const double localSurfDiff = _parDepSurfDiffusion[type]->combinedParameterSolid(
-								colPos,
-								static_cast<double>(parSurfDiff[idxBnd]),
-								yCell,
-								yCell + idxr.strideParLiquid(),
-								idxBnd
-							);
+		//				if (cadet_unlikely(_parDepSurfDiffusion[type]))
+		//				{
+		//					const double localSurfDiff = _parDepSurfDiffusion[type]->combinedParameterSolid(
+		//						colPos,
+		//						static_cast<double>(parSurfDiff[idxBnd]),
+		//						yCell,
+		//						yCell + idxr.strideParLiquid(),
+		//						idxBnd
+		//					);
 
-							const double v = kf_FV[comp] * localSurfDiff / dr;
-							const int curIdx = idxr.strideParLiquid() + idxBnd;
+		//					const double v = kf[comp] * localSurfDiff / dr;
+		//					const int curIdx = idxr.strideParLiquid() + idxBnd;
 
-							jacFPtype[pblk].addElement(eq, curIdx, -v);
-							jacFPtype[pblk].addElement(eq, curIdx + idxr.strideParShell(type), v);
+		//					jacFPtype[pblk].addElement(eq, curIdx, -v);
+		//					jacFPtype[pblk].addElement(eq, curIdx + idxr.strideParShell(type), v);
 
-							const double gradQ = (yCell[curIdx] - yCell[curIdx + idxr.strideParShell(type)]) / dr;
-							_parDepSurfDiffusion[type]->analyticJacobianCombinedAddSolid(
-								colPos,
-								static_cast<double>(parSurfDiff[idxBnd]),
-								yCell,
-								yCell + idxr.strideParLiquid(),
-								idxBnd,
-								-kf_FV[comp] * gradQ,
-								0,
-								eq,
-								jacFPtype[pblk]
-							);
-						}
-						else
-						{
-							const double v = kf_FV[comp] * static_cast<double>(parSurfDiff[idxBnd]) / dr;
-							const int curIdx = idxr.strideParLiquid() + idxBnd;
+		//					const double gradQ = (yCell[curIdx] - yCell[curIdx + idxr.strideParShell(type)]) / dr;
+		//					_parDepSurfDiffusion[type]->analyticJacobianCombinedAddSolid(
+		//						colPos,
+		//						static_cast<double>(parSurfDiff[idxBnd]),
+		//						yCell,
+		//						yCell + idxr.strideParLiquid(),
+		//						idxBnd,
+		//						-kf[comp] * gradQ,
+		//						0,
+		//						eq,
+		//						jacFPtype[pblk]
+		//					);
+		//				}
+		//				else
+		//				{
+		//					const double v = kf[comp] * static_cast<double>(parSurfDiff[idxBnd]) / dr;
+		//					const int curIdx = idxr.strideParLiquid() + idxBnd;
 
-							jacFPtype[pblk].addElement(eq, curIdx, -v);
-							jacFPtype[pblk].addElement(eq, curIdx + idxr.strideParShell(type), v);
-						}
-					}
-				}
-			}
-		}
+		//					jacFPtype[pblk].addElement(eq, curIdx, -v);
+		//					jacFPtype[pblk].addElement(eq, curIdx + idxr.strideParShell(type), v);
+		//				}
+		//			}
+		//		}
+		//	}
+		//}
 	}
 
 	_discParFlux.destroy<double>();
@@ -1874,7 +1884,7 @@ void GeneralRateModelDG::assembleOffdiagJacFluxParticle(double t, unsigned int s
 //	const double invBetaC = 1.0 / static_cast<double>(_colPorosity) - 1.0;
 
 	// Discretized film diffusion kf for finite volumes
-	double* const kf_FV = _discParFlux.create<double>(_disc.nComp);
+	double* const kf = _discParFlux.create<double>(_disc.nComp);
 
 	for (unsigned int type = 0; type < _disc.nParType; ++type)
 	{
@@ -1887,18 +1897,18 @@ void GeneralRateModelDG::assembleOffdiagJacFluxParticle(double t, unsigned int s
 		active const* const filmDiff = getSectionDependentSlice(_filmDiffusion, _disc.nComp * _disc.nParType, secIdx) + type * _disc.nComp;
 		active const* const parDiff = getSectionDependentSlice(_parDiffusion, _disc.nComp * _disc.nParType, secIdx) + type * _disc.nComp;
 
-		// Discretized film diffusion kf for finite volumes
-		if (cadet_likely(_colParBoundaryOrder == 2))
-		{
-			const double absOuterShellHalfRadius = 0.5 * static_cast<double>(_parCellSize[_disc.nParPointsBeforeType[type]]);
+		//// Discretized film diffusion kf for finite volumes
+		//if (cadet_likely(_colParBoundaryOrder == 2)) // @TODO: why, FV specific?
+		//{
+		//	const double absOuterShellHalfRadius = 0.5 * static_cast<double>(_parCellSize[_disc.nParPointsBeforeType[type]]);
+		//	for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
+		//		kf_FV[comp] = 1.0 / (absOuterShellHalfRadius / epsP / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]) / static_cast<double>(parDiff[comp]) + 1.0 / static_cast<double>(filmDiff[comp]));
+		//}
+		//else
+		//{
 			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-				kf_FV[comp] = 1.0 / (absOuterShellHalfRadius / epsP / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]) / static_cast<double>(parDiff[comp]) + 1.0 / static_cast<double>(filmDiff[comp]));
-		}
-		else
-		{
-			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-				kf_FV[comp] = static_cast<double>(filmDiff[comp]);
-		}
+				kf[comp] = static_cast<double>(filmDiff[comp]);
+		//}
 
 		// J_{f,p} block, adds outer bead shell state c_{p,i} to flux equation
 		linalg::DoubleSparseMatrix* const jacFPtype = _jacFP + type * _disc.nPoints;
@@ -1907,84 +1917,84 @@ void GeneralRateModelDG::assembleOffdiagJacFluxParticle(double t, unsigned int s
 			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
 			{
 				const unsigned int eq = typeOffset + pblk * idxr.strideColNode() + comp * idxr.strideColComp();
-				jacFPtype[pblk].addElement(eq, comp, kf_FV[comp]);
+				jacFPtype[pblk].addElement(eq, comp, kf[comp]);
 			}
 		}
 
-		if (_hasSurfaceDiffusion[type] && _binding[type]->hasQuasiStationaryReactions() && (_disc.nParCell[type] > 1))
-		{
-			int const* const qsReaction = _binding[type]->reactionQuasiStationarity();
+		//if (_hasSurfaceDiffusion[type] && _binding[type]->hasQuasiStationaryReactions() && (_disc.nParCell[type] > 1))
+		//{
+		//	int const* const qsReaction = _binding[type]->reactionQuasiStationarity();
 
-			// Ordering of particle surface diffusion:
-			// bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2
-			active const* const parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[type];
-			active const* const parCenterRadius = _parCenterRadius.data() + _disc.nParPointsBeforeType[type];
-			const double absOuterShellHalfRadius = 0.5 * static_cast<double>(_parCellSize[_disc.nParPointsBeforeType[type]]);
+		//	// Ordering of particle surface diffusion:
+		//	// bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2
+		//	active const* const parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[type];
+		//	//active const* const parCenterRadius = _parCenterRadius.data() + _disc.nParPointsBeforeType[type]; // @TODO: FV specific?
+		//	//const double absOuterShellHalfRadius = 0.5 * static_cast<double>(_parCellSize[_disc.nParPointsBeforeType[type]]); // @TODO: FV specific?
 
-			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-				kf_FV[comp] = (1.0 - static_cast<double>(_parPorosity[type])) / (1.0 + epsP * static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]) * static_cast<double>(parDiff[comp]) / (absOuterShellHalfRadius * static_cast<double>(filmDiff[comp])));
+		//	for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
+		//		kf[comp] = (1.0 - static_cast<double>(_parPorosity[type])) / (1.0 + epsP * static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]) * static_cast<double>(parDiff[comp]) / (absOuterShellHalfRadius * static_cast<double>(filmDiff[comp])));
 
-			for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
-			{
-				const ColumnPosition colPos{ _disc.deltaZ * std::floor(pblk / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes]), 0.0, static_cast<double>(parCenterRadius[0]) / static_cast<double>(_parRadius[type])};
-				const double dr = static_cast<double>(parCenterRadius[0]) - static_cast<double>(parCenterRadius[1]);
+		//	for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
+		//	{
+		//		const ColumnPosition colPos{ _disc.deltaZ * std::floor(pblk / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes]), 0.0, static_cast<double>(parCenterRadius[0]) / static_cast<double>(_parRadius[type])};
+		//		const double dr = static_cast<double>(parCenterRadius[0]) - static_cast<double>(parCenterRadius[1]);
 
-				double const* const yCell = vecStateY + idxr.offsetCp(ParticleTypeIndex{type}, ParticleIndex{pblk});
+		//		double const* const yCell = vecStateY + idxr.offsetCp(ParticleTypeIndex{type}, ParticleIndex{pblk});
 
-				for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-				{
-					const unsigned int eq = typeOffset + pblk * idxr.strideColNode() + comp * idxr.strideColComp();
-					const unsigned int nBound = _disc.nBound[_disc.nComp * type + comp];
+		//		for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
+		//		{
+		//			const unsigned int eq = typeOffset + pblk * idxr.strideColNode() + comp * idxr.strideColComp();
+		//			const unsigned int nBound = _disc.nBound[_disc.nComp * type + comp];
 
-					for (unsigned int i = 0; i < nBound; ++i)
-					{
-						const int idxBnd = idxr.offsetBoundComp(ParticleTypeIndex{type}, ComponentIndex{comp}) + i;
+		//			for (unsigned int i = 0; i < nBound; ++i)
+		//			{
+		//				const int idxBnd = idxr.offsetBoundComp(ParticleTypeIndex{type}, ComponentIndex{comp}) + i;
 
-						// Skip quasi-stationary bound states
-						if (!qsReaction[idxBnd])
-							continue;
+		//				// Skip quasi-stationary bound states
+		//				if (!qsReaction[idxBnd])
+		//					continue;
 
-						if (_parDepSurfDiffusion[type])
-						{
-							const double localSurfDiff = _parDepSurfDiffusion[type]->combinedParameterSolid(
-								colPos,
-								static_cast<double>(parSurfDiff[idxBnd]),
-								yCell,
-								yCell + idxr.strideParLiquid(),
-								idxBnd
-							);
+		//				if (_parDepSurfDiffusion[type])
+		//				{
+		//					const double localSurfDiff = _parDepSurfDiffusion[type]->combinedParameterSolid(
+		//						colPos,
+		//						static_cast<double>(parSurfDiff[idxBnd]),
+		//						yCell,
+		//						yCell + idxr.strideParLiquid(),
+		//						idxBnd
+		//					);
 
-							const double v = kf_FV[comp] * localSurfDiff / dr;
-							const int curIdx = idxr.strideParLiquid() + idxBnd;
+		//					const double v = kf[comp] * localSurfDiff / dr;
+		//					const int curIdx = idxr.strideParLiquid() + idxBnd;
 
-							jacFPtype[pblk].addElement(eq, curIdx, -v);
-							jacFPtype[pblk].addElement(eq, curIdx + idxr.strideParShell(type), v);
+		//					jacFPtype[pblk].addElement(eq, curIdx, -v);
+		//					jacFPtype[pblk].addElement(eq, curIdx + idxr.strideParShell(type), v);
 
-							const double gradQ = (yCell[curIdx] - yCell[curIdx + idxr.strideParShell(type)]) / dr;
-							_parDepSurfDiffusion[type]->analyticJacobianCombinedAddSolid(
-								colPos,
-								static_cast<double>(parSurfDiff[idxBnd]),
-								yCell,
-								yCell + idxr.strideParLiquid(),
-								idxBnd,
-								-kf_FV[comp] * gradQ,
-								0,
-								eq,
-								jacFPtype[pblk]
-							);
-						}
-						else
-						{
-							const double v = kf_FV[comp] * static_cast<double>(parSurfDiff[idxBnd]) / dr;
-							const int curIdx = idxr.strideParLiquid() + idxBnd;
+		//					const double gradQ = (yCell[curIdx] - yCell[curIdx + idxr.strideParShell(type)]) / dr;
+		//					_parDepSurfDiffusion[type]->analyticJacobianCombinedAddSolid(
+		//						colPos,
+		//						static_cast<double>(parSurfDiff[idxBnd]),
+		//						yCell,
+		//						yCell + idxr.strideParLiquid(),
+		//						idxBnd,
+		//						-kf[comp] * gradQ,
+		//						0,
+		//						eq,
+		//						jacFPtype[pblk]
+		//					);
+		//				}
+		//				else
+		//				{
+		//					const double v = kf[comp] * static_cast<double>(parSurfDiff[idxBnd]) / dr;
+		//					const int curIdx = idxr.strideParLiquid() + idxBnd;
 
-							jacFPtype[pblk].addElement(eq, curIdx, -v);
-							jacFPtype[pblk].addElement(eq, curIdx + idxr.strideParShell(type), v);
-						}
-					}
-				}
-			}
-		}
+		//					jacFPtype[pblk].addElement(eq, curIdx, -v);
+		//					jacFPtype[pblk].addElement(eq, curIdx + idxr.strideParShell(type), v);
+		//				}
+		//			}
+		//		}
+		//	}
+		//}
 	}
 
 	_discParFlux.destroy<double>();

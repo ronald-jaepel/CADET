@@ -940,7 +940,8 @@ protected:
 				+ _disc.boundary[3]); // right boundary value S
 	}
 
-	void InterfaceFluxParticle(int parType, Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>>& state, unsigned int strideCell, unsigned int strideNode) {
+	void InterfaceFluxParticle(int parType, Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>>& state,
+		unsigned int strideCell, unsigned int strideNode, bool aux) {
 
 		// reset surface flux storage as it is used multiple times
 		_disc.surfaceFluxParticle[parType].setZero();
@@ -954,12 +955,18 @@ protected:
 					state[Cell * strideCell]); // inner/right node
 		}
 
-		// calculate boundary interface fluxes. ghost nodes given by state^- := state^+
+		// calculate boundary interface fluxes.
 		// Note that inflow boundary conditions are handled in residualFlux()
+		if (aux) { // ghost nodes given by state^- := state^+ for auxiliary equation
+			_disc.surfaceFluxParticle[parType][0] = state[0];
 
-		_disc.surfaceFluxParticle[parType][0] = state[0];
+			_disc.surfaceFluxParticle[parType][_disc.nParCell[parType]] = state[_disc.nParCell[parType] * strideCell - strideNode];
+		}
+		else { // ghost nodes given by state^- := 0.0 for main equation
+			_disc.surfaceFluxParticle[parType][0] = 0.0;// state[0];
 
-		_disc.surfaceFluxParticle[parType][_disc.nParCell[parType]] = state[_disc.nParCell[parType] * strideCell - strideNode];
+			_disc.surfaceFluxParticle[parType][_disc.nParCell[parType]] = 0.0; // state[parDisc.nCells * strideCell - strideNode];
+		}
 	}
 
 	/**
@@ -1027,18 +1034,18 @@ protected:
 		}
 	}
 	void parSurfaceIntegral(int parType, Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>>& state,
-		Eigen::Map<VectorXd, 0, InnerStride<Dynamic>>& stateDer, unsigned int strideCell, unsigned int strideNode) {
+		Eigen::Map<VectorXd, 0, InnerStride<Dynamic>>& stateDer, unsigned int strideCell, unsigned int strideNode, bool aux) {
 
 		// calc numerical flux values
-		InterfaceFluxParticle(parType, state, strideCell, strideNode);
+		InterfaceFluxParticle(parType, state, strideCell, strideNode, aux);
 		if (_disc.modal) { // modal approach -> dense mass matrix
 			for (unsigned int Cell = 0; Cell < _disc.nParCell[parType]; Cell++) {
 				// strong surface integral -> M^-1 B [state - state*]
 				for (unsigned int Node = 0; Node < _disc.nParNode[parType]; Node++) {
 					stateDer[Cell * strideCell + Node * strideNode]
-						-= _disc.invMM(Node, 0) * (state[Cell * strideCell]
+						-= _disc.parInvMM[parType](Node, 0) * (state[Cell * strideCell]
 							- _disc.surfaceFluxParticle[parType][Cell])
-						- _disc.invMM(Node, _disc.parPolyDeg[parType]) * (state[Cell * strideCell + _disc.parPolyDeg[parType] * strideNode]
+						- _disc.parInvMM[parType](Node, _disc.parPolyDeg[parType]) * (state[Cell * strideCell + _disc.parPolyDeg[parType] * strideNode]
 							- _disc.surfaceFluxParticle[parType][(Cell + 1u)]);
 				}
 			}
@@ -1047,10 +1054,10 @@ protected:
 			for (unsigned int Cell = 0; Cell < _disc.nParCell[parType]; Cell++) {
 				// strong surface integral -> M^-1 B [state - state*]
 				stateDer[Cell * strideCell] // first cell node
-					-= _disc.invWeights[0] * (state[Cell * strideCell] // first node
+					-= _disc.parInvWeights[parType][0] * (state[Cell * strideCell] // first node
 						- _disc.surfaceFluxParticle[parType][Cell]);
 				stateDer[Cell * strideCell + _disc.parPolyDeg[parType] * strideNode] // last cell node
-					+= _disc.invWeights[_disc.parPolyDeg[parType]] * (state[Cell * strideCell + _disc.parPolyDeg[parType] * strideNode]
+					+= _disc.parInvWeights[parType][_disc.parPolyDeg[parType]] * (state[Cell * strideCell + _disc.parPolyDeg[parType] * strideNode]
 						- _disc.surfaceFluxParticle[parType][Cell + 1u]);
 			}
 		}
@@ -1151,7 +1158,7 @@ protected:
 		// DG volumne integral: - D c
 		parVolumeIntegral(parType, conc, g_p);
 		// surface integral: M^-1 B [c - c^*]
-		parSurfaceIntegral(parType, conc, g_p, strideCell, strideNode);
+		parSurfaceIntegral(parType, conc, g_p, strideCell, strideNode, true);
 		// inverse mapping from reference space and auxiliary factor -1
 		g_p *= - 2.0 / _disc.deltaR[parType];
 
@@ -1658,25 +1665,29 @@ protected:
 		unsigned int sCell = _disc.nParNode[parType] * idxr.strideParShell(parType);
 		unsigned int sNode = idxr.strideParShell(parType);
 		unsigned int sComp = 1u;
+		//
+		unsigned int nNodes = _disc.nParNode[parType];
+
 		// blocks to compute jacobian
 		Eigen::MatrixXd dispBlock;
 		double invMap = (2.0 / _disc.deltaR[parType]);
 		Eigen::MatrixXd B = MatrixXd::Zero(_disc.nParNode[parType], _disc.nParNode[parType]);
 		B(0, 0) = -1.0; B(_disc.nParNode[parType] - 1, _disc.nParNode[parType] - 1) = 1.0;
 		Eigen::MatrixXd invMM = _disc.parInvWeights[parType].asDiagonal();
-		Eigen::MatrixXd M_1M_rD = MatrixXd::Zero(_disc.nParNode[parType], _disc.nParNode[parType]);
+		Eigen::MatrixXd M_1M_rG;
 
 		// special case: one cell -> diffBlock \in R^(nParNodes x nParNodes), GBlock = parPolyDerM
 		if (_disc.nParCell[parType] == 1) {
 
-			dispBlock = invMap * (_disc.parPolyDerM[parType] * _disc.parPolyDerM[parType] - invMM * B * _disc.parPolyDerM[parType]);
+			M_1M_rG = MatrixXd::Zero(_disc.nParNode[parType], _disc.nParNode[parType]);
+			dispBlock = invMap * (_disc.parPolyDerM[parType] * _disc.parPolyDerM[parType]);
 
 			// compute metric part separately, because of cell dependend left interface coordinate r_L
 			double r_L = static_cast<double>(_parRadius[parType]) - 0.0 * _disc.deltaR[parType]; // left boundary of current cell
 			for (int node = 0; node < _disc.nParNode[parType]; node++) {
-				M_1M_rD(node, node) = 0.5 * (0.5 * _disc.deltaR[parType] * (_disc.parNodes[parType][node] + 1.0) + r_L);
+				M_1M_rG(node, node) = 2.0 / (r_L + (_disc.deltaR[parType] / 2.0) * (_disc.parNodes[parType][node] + 1.0));
 			}
-			M_1M_rD *= _disc.parPolyDerM[parType];
+			M_1M_rG *= _disc.parPolyDerM[parType];
 
 			// fill the jacobian: add dispersion block for each unbound and bound component, adjusted for the respective coefficients
 			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
@@ -1690,16 +1701,18 @@ protected:
 						jacP.coeffRef(comp * sComp + i * sNode,
 							comp * sComp + j * sNode)
 							= -(invMap * diff[0])
-							* (M_1M_rD(i, j) + dispBlock(i, j)); // diffBlock += invMap* D_p * (M^-1 * M_r * D + invMap * (D * D - M^-1 * B * D))
+							* (M_1M_rG(i, j) + dispBlock(i, j)); // dispBlock += invMap* D_p * (M^-1 * M_r * D + invMap * (D * D - M^-1 * B * D))
 
-		// handle bound states
-						for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-							// row: add bound state offset and go node strides from there for each dispersion block entry
-							// col: add bound state offset and go node strides from there for each dispersion block entry
-							jacP.coeffRef(idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + i * sNode,
-										  idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + j * sNode)
-								= -(invMap * diff[0])
-								* (M_1M_rD(i, j) + dispBlock(i, j)); // diffBlock += invMap* D_p * (M^-1 * M_r * D + invMap * (D * D - M^-1 * B * D))
+						// handle surface diffusion of bound states. binding is handled in residualKernel().
+						if (_hasSurfaceDiffusion[parType]) {
+							for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
+								// row: add current component offset and go node strides from there for each dispersion block entry
+								// col: jump oover liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+								jacP.coeffRef(comp * sComp + i * sNode,
+											  idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode)
+									= -(invMap * diff[bnd + 1] * invBetaP[comp])
+									* (M_1M_rG(i, j) + dispBlock(i, j)); // dispBlock = 2/D_r* D_p * (M^-1 * M_r * D + invMap * (D * D - M^-1 * B * D))
+							}
 						}
 					}
 				}
@@ -1900,7 +1913,7 @@ protected:
 				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
 					for (unsigned int j = 0; j < 2 * nNodes; j++) {
 						_jacC.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
-							offC + (nCells - 1 - 1) * sCell + comp * sComp + j * sNode)
+									   offC + (nCells - 1 - 1) * sCell + comp * sComp + j * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
