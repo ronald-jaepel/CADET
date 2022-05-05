@@ -77,6 +77,27 @@ public:
 	}
 
 	/**
+	* @brief Adds the given array to the current row
+	* @details Performs the operation @f$ y = y + \alpha x @f$, where @f$ x @f$ may only be a
+	*          subset of the current row the iterator points to. The start of the subset is
+	*          given by @p startDiag. The subset has to fully fit into the matrix row.
+	* @param [in] row Pointer to array @f$ x @f$ that is added to the given row @f$ y @f$
+	* @param [in] startDiag Index of the diagonal at which the row is added
+	* @param [in] length Length of the array
+	* @param [in] factor Factor @f$ \alpha @f$
+	*/
+	inline void addArray(double const* row, int startDiag, int length, double factor)
+	{
+		// shift to column index to start with
+		int idx = startDiag - _row;
+
+		for (int i = 0; i < length; i++) {
+			_values[idx + i] = factor * row[i];
+		}
+
+	}
+
+	/**
 	 * @brief Accesses an element in the current row where the main diagonal is centered (index @c 0)
 	 * @details The @p diagonal determines the element in a row. A negative index indicates a lower diagonal,
 	 *          while a positive index indicates an upper diagonal. If @p diagonal is @c 0, then the main
