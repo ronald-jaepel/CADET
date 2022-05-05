@@ -1679,15 +1679,21 @@ protected:
 		// special case: one cell -> diffBlock \in R^(nParNodes x nParNodes), GBlock = parPolyDerM
 		if (_disc.nParCell[parType] == 1) {
 
-			M_1M_rG = MatrixXd::Zero(nNodes, nNodes);
-			dispBlock = invMap * (_disc.parPolyDerM[parType] * _disc.parPolyDerM[parType]);
+			dispBlock = invMap * _disc.parPolyDerM[parType] * (_disc.parPolyDerM[parType] - _disc.parInvWeights[parType].asDiagonal() * B);
 
 			// compute metric part separately, because of cell dependend left interface coordinate r_L
-			double r_L = static_cast<double>(_parRadius[parType]) - 0.0 * _disc.deltaR[parType]; // left boundary of current cell
-			for (int node = 0; node < nNodes; node++) {
-				M_1M_rG(node, node) = 2.0 / (r_L + (_disc.deltaR[parType] / 2.0) * (_disc.parNodes[parType][node] + 1.0));
+			if (_parGeomSurfToVol[parType] != 1.0) { // no metric part for slab!
+
+				M_1M_rG = MatrixXd::Zero(nNodes, nNodes);
+				double r_L = static_cast<double>(_parRadius[parType]) - 0.0 * _disc.deltaR[parType]; // left boundary of current cell
+
+				for (int node = 0; node < nNodes; node++) {
+					M_1M_rG(node, node) = (_parGeomSurfToVol[parType] - 1.0) / (r_L + (_disc.deltaR[parType] / 2.0) * (_disc.parNodes[parType][node] + 1.0));
+				}
+				M_1M_rG *= _disc.parPolyDerM[parType];
+
+				dispBlock += M_1M_rG;
 			}
-			M_1M_rG *= _disc.parPolyDerM[parType];
 
 			// fill the jacobian: add dispersion block for each unbound and bound component, adjusted for the respective coefficients
 			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
@@ -1700,8 +1706,7 @@ protected:
 						// col: add component offset and go node strides from there for each dispersion block entry
 						jacP.coeffRef(comp * sComp + i * sNode,
 									  comp * sComp + j * sNode)
-							= -(invMap * diff[0])
-							* (M_1M_rG(i, j) + dispBlock(i, j)); // dispBlock += invMap* D_p * (M^-1 * M_r * D + invMap * (D * D - M^-1 * B * D))
+							= -(invMap * diff[0]) * dispBlock(i, j); // dispBlock += invMap* D_p * (M^-1 * M_r * D + invMap * (D * D - M^-1 * B * D))
 
 						// handle surface diffusion of bound states. binding is handled in residualKernel().
 						if (_hasSurfaceDiffusion[parType]) {
@@ -1710,8 +1715,7 @@ protected:
 								// col: jump oover liquid states, add current bound state offset and go node strides from there for each dispersion block entry
 								jacP.coeffRef(comp * sComp + i * sNode,
 											  idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode)
-									= -(invMap * diff[bnd + 1] * invBetaP[comp])
-									* (M_1M_rG(i, j) + dispBlock(i, j)); // dispBlock = 2/D_r* D_p * (M^-1 * M_r * D + invMap * (D * D - M^-1 * B * D))
+									= -(invMap * diff[bnd + 1] * invBetaP[comp]) * dispBlock(i, j); // dispBlock = 2/D_r* D_p * (M^-1 * M_r * D + invMap * (D * D - M^-1 * B * D))
 							}
 						}
 					}
@@ -1758,17 +1762,18 @@ protected:
 			bnd_dispBlock *= invMap;
 
 			// compute metric part separately, because of cell dependend left interface coordinate r_L
-			double r_L = static_cast<double>(_parRadius[parType]) - _cell * _disc.deltaR[parType]; // left boundary of current cell
+			if (_parGeomSurfToVol[parType] != 1.0) { // no metric part for slab!
 
-			for (int node = 0; node < nNodes; node++) {
-				for (int node2 = 0; node2 < nNodes + 1; node2++) {
-					bnd_M_1M_rG(node, node2) = GBlock_l(node, node2) * (2.0 / (r_L + (_disc.deltaR[parType] / 2.0) * (_disc.parNodes[parType][node] + 1.0)));
+				double r_L = static_cast<double>(_parRadius[parType]) - _cell * _disc.deltaR[parType]; // left boundary of current cell
+
+				for (int node = 0; node < nNodes; node++) {
+					for (int node2 = 0; node2 < nNodes + 1; node2++) {
+						bnd_M_1M_rG(node, node2) = GBlock_l(node, node2) * ((_parGeomSurfToVol[parType] - 1.0) / (r_L + (_disc.deltaR[parType] / 2.0) * (_disc.parNodes[parType][node] + 1.0)));
+					}
 				}
+				// dispBlock <- M^-1 * M_r * G_l +  invMap * ( D * G_l - M^-1 * B * [G_l - g^*] )
+				bnd_dispBlock.block(0, 0, nNodes, nNodes + 1) += bnd_M_1M_rG;
 			}
-
-			// dispBlock <- M^-1 * M_r * G_l +  invMap * ( D * G_l - M^-1 * B * [G_l - g^*] )
-			bnd_dispBlock.block(0, 0, nNodes, nNodes + 1) += bnd_M_1M_rG;
-
 			//std::cout << "dispBlock\n" << dispBlock * 1e-5 << std::endl;
 
 			// fill the jacobian: add dispersion block for each unbound and bound component, adjusted for the respective coefficients
@@ -1812,16 +1817,19 @@ protected:
 			bnd_dispBlock *= invMap;
 
 			// compute metric part separately, because of cell dependend left interface coordinate r_L
-			r_L = static_cast<double>(_parRadius[parType]) - _cell * _disc.deltaR[parType]; // left boundary of current cell
-			bnd_M_1M_rG.setZero();
-			for (int node = 0; node < nNodes; node++) {
-				for (int node2 = 0; node2 < nNodes + 1; node2++) {
-					bnd_M_1M_rG(node, node2) = GBlock_r(node, node2) * (2.0 / (r_L + (_disc.deltaR[parType] / 2.0) * (_disc.parNodes[parType][node] + 1.0)));
-				}
-			}
+			if (_parGeomSurfToVol[parType] != 1.0) { // no metric part for slab!
 
-			// dispBlock <- M^-1 * M_r * G_r +  invMap * ( D * G_r - M^-1 * B * [G_r - g^*] )
-			bnd_dispBlock.block(0, nNodes - 1, nNodes, nNodes + 1) += bnd_M_1M_rG;
+				bnd_M_1M_rG.setZero();
+				double r_L = static_cast<double>(_parRadius[parType]) - _cell * _disc.deltaR[parType]; // left boundary of current cell
+
+				for (int node = 0; node < nNodes; node++) {
+					for (int node2 = 0; node2 < nNodes + 1; node2++) {
+						bnd_M_1M_rG(node, node2) = GBlock_r(node, node2) * ((_parGeomSurfToVol[parType] - 1.0) / (r_L + (_disc.deltaR[parType] / 2.0) * (_disc.parNodes[parType][node] + 1.0)));
+					}
+				}
+				// dispBlock <- M^-1 * M_r * G_r +  invMap * ( D * G_r - M^-1 * B * [G_r - g^*] )
+				bnd_dispBlock.block(0, nNodes - 1, nNodes, nNodes + 1) += bnd_M_1M_rG;
+			}
 
 			// fill the jacobian: add dispersion block for each unbound and bound component, adjusted for the respective coefficients
 			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
@@ -1875,14 +1883,19 @@ protected:
 			for (int cell = 1; cell < _disc.nParCell[parType] - 1; cell++) {
 
 				// compute metric part separately, because of cell dependend left interface coordinate r_L
-				r_L = static_cast<double>(_parRadius[parType]) - cell * _disc.deltaR[parType]; // left boundary of current cell
-				for (int node = 0; node < nNodes; node++) {
-					for (int node2 = 0; node2 < nNodes + 2; node2++) {
-						M_1M_rG(node, node2) = GBlock(node, node2) * (2.0 / (r_L + (_disc.deltaR[parType] / 2.0) * (_disc.parNodes[parType][node] + 1.0)));
+				if (_parGeomSurfToVol[parType] != 1.0) { // no metric part for slab!
+
+					M_1M_rG.setZero();
+					double r_L = static_cast<double>(_parRadius[parType]) - cell * _disc.deltaR[parType]; // left boundary of current cell
+
+					for (int node = 0; node < nNodes; node++) {
+						for (int node2 = 0; node2 < nNodes + 2; node2++) {
+							M_1M_rG(node, node2) = GBlock(node, node2) * ((_parGeomSurfToVol[parType] - 1.0) / (r_L + (_disc.deltaR[parType] / 2.0) * (_disc.parNodes[parType][node] + 1.0)));
+						}
 					}
+					// dispBlock <- M^-1 * M_r * G_r +  invMap * ( D * G_r - M^-1 * B * [G_r - g^*] )
+					dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) += M_1M_rG;
 				}
-				// dispBlock <- M^-1 * M_r * G_r +  invMap * ( D * G_r - M^-1 * B * [G_r - g^*] )
-				dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) += M_1M_rG;
 
 				// fill the jacobian: add dispersion block for each unbound and bound component, adjusted for the respective coefficients
 				for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
