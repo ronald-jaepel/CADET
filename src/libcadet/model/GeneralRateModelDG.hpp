@@ -322,7 +322,7 @@ protected:
 		Eigen::VectorXd surfaceFlux; //!< stores the surface flux values of the bulk phase
 		Eigen::VectorXd* surfaceFluxParticle; //!< stores the surface flux values for each particle
 		Eigen::Vector4d boundary; //!< stores the boundary values from Danckwert boundary conditions of the bulk phase
-		Eigen::Vector4d pBoundary; //!< stores the boundary values from Danckwert boundary conditions of the bulk phase
+		double* localFlux; //!< stores the local Flux to implement film diffusion
 
 		std::vector<bool> isKinetic;
 
@@ -366,6 +366,7 @@ protected:
 			parPolyDerM = new MatrixXd [nParType];
 			parInvMM = new MatrixXd [nParType];
 			newStaticJacP = new bool [nParType * nCol];
+			localFlux = new double[1];
 			for (int parType = 0; parType < nParType; parType++) {
 				nParNode[parType] = parPolyDeg[parType] + 1u;
 				nParPoints[parType] = nParNode[parType] * nParCell[parType];
@@ -941,7 +942,7 @@ protected:
 	}
 
 	void InterfaceFluxParticle(int parType, Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>>& state,
-		unsigned int strideCell, unsigned int strideNode, bool aux) {
+		unsigned int strideCell, unsigned int strideNode, bool aux, int comp) {
 
 		// reset surface flux storage as it is used multiple times
 		_disc.surfaceFluxParticle[parType].setZero();
@@ -963,9 +964,10 @@ protected:
 			_disc.surfaceFluxParticle[parType][_disc.nParCell[parType]] = state[_disc.nParCell[parType] * strideCell - strideNode];
 		}
 		else { // ghost nodes given by state^- := 0.0 for main equation
-			_disc.surfaceFluxParticle[parType][0] = 0.0;// state[0];
+			_disc.surfaceFluxParticle[parType][0] = 2.0 / (static_cast<double>(_parPorosity[parType]) * static_cast<double>(_poreAccessFactor[parType * _disc.nComp + comp]))
+													* _disc.localFlux[0];  // 2 outerAreaPerVolume / epsP; @TODO: why?
 
-			_disc.surfaceFluxParticle[parType][_disc.nParCell[parType]] = 0.0; // state[parDisc.nCells * strideCell - strideNode];
+			_disc.surfaceFluxParticle[parType][_disc.nParCell[parType]] = 0.0;
 		}
 	}
 
@@ -1034,10 +1036,10 @@ protected:
 		}
 	}
 	void parSurfaceIntegral(int parType, Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>>& state,
-		Eigen::Map<VectorXd, 0, InnerStride<Dynamic>>& stateDer, unsigned int strideCell, unsigned int strideNode, bool aux) {
+		Eigen::Map<VectorXd, 0, InnerStride<Dynamic>>& stateDer, unsigned int strideCell, unsigned int strideNode, bool aux, int comp = 0) {
 
 		// calc numerical flux values
-		InterfaceFluxParticle(parType, state, strideCell, strideNode, aux);
+		InterfaceFluxParticle(parType, state, strideCell, strideNode, aux, comp);
 		if (_disc.modal) { // modal approach -> dense mass matrix
 			for (unsigned int Cell = 0; Cell < _disc.nParCell[parType]; Cell++) {
 				// strong surface integral -> M^-1 B [state - state*]
