@@ -322,7 +322,7 @@ protected:
 		Eigen::VectorXd surfaceFlux; //!< stores the surface flux values of the bulk phase
 		Eigen::VectorXd* surfaceFluxParticle; //!< stores the surface flux values for each particle
 		Eigen::Vector4d boundary; //!< stores the boundary values from Danckwert boundary conditions of the bulk phase
-		double* localFlux; //!< stores the local Flux to implement film diffusion
+		const double* localFlux; //!< stores the local Flux to implement film diffusion
 
 		std::vector<bool> isKinetic;
 
@@ -942,7 +942,7 @@ protected:
 	}
 
 	void InterfaceFluxParticle(int parType, Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>>& state,
-		unsigned int strideCell, unsigned int strideNode, bool aux, int comp) {
+		unsigned int strideCell, unsigned int strideNode, bool aux, int comp, double Dp) {
 
 		// reset surface flux storage as it is used multiple times
 		_disc.surfaceFluxParticle[parType].setZero();
@@ -963,8 +963,9 @@ protected:
 
 			_disc.surfaceFluxParticle[parType][_disc.nParCell[parType]] = state[_disc.nParCell[parType] * strideCell - strideNode];
 		}
-		else { // ghost nodes given by state^- := 0.0 for main equation
-			_disc.surfaceFluxParticle[parType][0] = 2.0 / (static_cast<double>(_parPorosity[parType]) * static_cast<double>(_poreAccessFactor[parType * _disc.nComp + comp]))
+		else { // ghost nodes given by state^- := -state^+ plus film diffusion for main equation
+
+			_disc.surfaceFluxParticle[parType][0] = 2.0 / (static_cast<double>(_parPorosity[parType]) * static_cast<double>(_poreAccessFactor[parType * _disc.nComp + comp]) * Dp)
 													* _disc.localFlux[0];  // 2 outerAreaPerVolume / epsP; @TODO: why?
 
 			_disc.surfaceFluxParticle[parType][_disc.nParCell[parType]] = 0.0;
@@ -1036,10 +1037,10 @@ protected:
 		}
 	}
 	void parSurfaceIntegral(int parType, Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>>& state,
-		Eigen::Map<VectorXd, 0, InnerStride<Dynamic>>& stateDer, unsigned int strideCell, unsigned int strideNode, bool aux, int comp = 0) {
+		Eigen::Map<VectorXd, 0, InnerStride<Dynamic>>& stateDer, unsigned int strideCell, unsigned int strideNode, bool aux, double Dp, int comp = 0) {
 
 		// calc numerical flux values
-		InterfaceFluxParticle(parType, state, strideCell, strideNode, aux, comp);
+		InterfaceFluxParticle(parType, state, strideCell, strideNode, aux, comp, Dp);
 		if (_disc.modal) { // modal approach -> dense mass matrix
 			for (unsigned int Cell = 0; Cell < _disc.nParCell[parType]; Cell++) {
 				// strong surface integral -> M^-1 B [state - state*]
@@ -1160,7 +1161,7 @@ protected:
 		// DG volumne integral: - D c
 		parVolumeIntegral(parType, conc, g_p);
 		// surface integral: M^-1 B [c - c^*]
-		parSurfaceIntegral(parType, conc, g_p, strideCell, strideNode, true);
+		parSurfaceIntegral(parType, conc, g_p, strideCell, strideNode, true, 0.0);
 		// inverse mapping from reference space and auxiliary factor -1
 		g_p *= - 2.0 / _disc.deltaR[parType];
 
@@ -1670,6 +1671,8 @@ protected:
 		//
 		unsigned int nNodes = _disc.nParNode[parType];
 
+		double SurfVolRatioSlab = 1.0;
+
 		// blocks to compute jacobian
 		Eigen::MatrixXd dispBlock;
 		double invMap = (2.0 / _disc.deltaR[parType]);
@@ -1684,7 +1687,7 @@ protected:
 			dispBlock = invMap * _disc.parPolyDerM[parType] * (_disc.parPolyDerM[parType] - _disc.parInvWeights[parType].asDiagonal() * B);
 
 			// compute metric part separately, because of cell dependend left interface coordinate r_L
-			if (_parGeomSurfToVol[parType] != 1.0) { // no metric part for slab!
+			if (_parGeomSurfToVol[parType] != SurfVolRatioSlab) { // no metric part for slab!
 
 				M_1M_rG = MatrixXd::Zero(nNodes, nNodes);
 				double r_L = static_cast<double>(_parRadius[parType]) - 0.0 * _disc.deltaR[parType]; // left boundary of current cell
@@ -1764,7 +1767,7 @@ protected:
 			bnd_dispBlock *= invMap;
 
 			// compute metric part separately, because of cell dependend left interface coordinate r_L
-			if (_parGeomSurfToVol[parType] != 1.0) { // no metric part for slab!
+			if (_parGeomSurfToVol[parType] != SurfVolRatioSlab) { // no metric part for slab!
 
 				double r_L = static_cast<double>(_parRadius[parType]) - _cell * _disc.deltaR[parType]; // left boundary of current cell
 
@@ -1819,7 +1822,7 @@ protected:
 			bnd_dispBlock *= invMap;
 
 			// compute metric part separately, because of cell dependend left interface coordinate r_L
-			if (_parGeomSurfToVol[parType] != 1.0) { // no metric part for slab!
+			if (_parGeomSurfToVol[parType] != SurfVolRatioSlab) { // no metric part for slab!
 
 				bnd_M_1M_rG.setZero();
 				double r_L = static_cast<double>(_parRadius[parType]) - _cell * _disc.deltaR[parType]; // left boundary of current cell
@@ -1885,7 +1888,7 @@ protected:
 			for (int cell = 1; cell < _disc.nParCell[parType] - 1; cell++) {
 
 				// compute metric part separately, because of cell dependend left interface coordinate r_L
-				if (_parGeomSurfToVol[parType] != 1.0) { // no metric part for slab!
+				if (_parGeomSurfToVol[parType] != SurfVolRatioSlab) { // no metric part for slab!
 
 					M_1M_rG.setZero();
 					double r_L = static_cast<double>(_parRadius[parType]) - cell * _disc.deltaR[parType]; // left boundary of current cell

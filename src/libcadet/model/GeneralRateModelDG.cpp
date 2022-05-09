@@ -1481,7 +1481,7 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 		// ====================================================================================//
 
 		Eigen::Map<VectorXd, 0, InnerStride<Dynamic>> resC_p(res + comp * idxr.strideParComp(), _disc.nParPoints[parType], InnerStride<Dynamic>(idxr.strideParShell(parType)));
-		if (_parGeomSurfToVol[parType] != 1.0) { // no metric part for slab!
+		if (_parGeomSurfToVol[parType] != SurfVolRatioSlab) { // no metric part for slab!
 			if (_disc.modal == false) {
 				for (int cell = 0; cell < static_cast<int>(_disc.nParCell[parType]); cell++) {
 
@@ -1512,7 +1512,7 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 		// get the local flux value to implement film diffusion boundary condition
 		_disc.localFlux = reinterpret_cast<const double*>(yBase) + idxr.offsetJf(ParticleTypeIndex{ parType }) + colNode;
 
-		parSurfaceIntegral(parType, _g_pSum, resC_p, strideCell, strideNode, false, comp); // adds M^-1 B (g_sum - g_sum^*) to the residual
+		parSurfaceIntegral(parType, _g_pSum, resC_p, strideCell, strideNode, false, static_cast<double>(parDiff[comp]), comp); // adds M^-1 B (g_sum - g_sum^*) to the residual
 
 		//std::cout << "res_after\n" << resC_p << std::endl;
 
@@ -1731,7 +1731,8 @@ void GeneralRateModelDG::assembleOffdiagJac(double t, unsigned int secIdx, doubl
 		const double outerAreaPerVolume = static_cast<double>(_parOuterSurfAreaPerVolume[_disc.nParPointsBeforeType[type]]);
 
 		const double jacCF_val = invBetaC * surfaceToVolumeRatio;
-		const double jacPF_val = -1.0 / epsP; // -outerAreaPerVolume / epsP; // @TODO: FV specific?
+		const double jacPF_val = -2.0 / (epsP * _disc.deltaR[type]); // -outerAreaPerVolume / epsP; // @TODO: FV specific?
+		//const double jacPF_val = -1.0 / epsP; // -outerAreaPerVolume / epsP; // @TODO: FV specific?
 
 		// Discretized film diffusion kf for finite volumes
 		//if (cadet_likely(_colParBoundaryOrder == 2)) // @TODO: why?
@@ -1773,7 +1774,7 @@ void GeneralRateModelDG::assembleOffdiagJac(double t, unsigned int secIdx, doubl
 			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
 			{
 				const unsigned int eq = typeOffset + pblk * idxr.strideColNode() + comp * idxr.strideColComp();
-				jacPFtype[pblk].addElement(comp, eq, jacPF_val / static_cast<double>(_poreAccessFactor[comp]));
+				jacPFtype[pblk].addElement(comp, eq, jacPF_val * _disc.parInvWeights[type][0] / static_cast<double>(_poreAccessFactor[comp]));
 			}
 		}
 

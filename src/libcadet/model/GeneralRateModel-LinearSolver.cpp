@@ -706,7 +706,7 @@ int GeneralRateModelDG::linearSolve(double t, double alpha, double outerTol, dou
 			{
 				const unsigned int type = pblk / _disc.nPoints;
 				const unsigned int par = pblk % _disc.nPoints;
-				Eigen::Map<VectorXd> r(rhs + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }), _disc.nParPoints[type]);
+				Eigen::Map<VectorXd> r(rhs + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }), static_cast<int>(_disc.nParPoints[type]) * idxr.strideParShell(type));
 				_parSolver[type * _disc.nPoints + par].solve(r);
 				if (_parSolver[type * _disc.nPoints + par].info() != Eigen::Success)
 				{
@@ -806,7 +806,7 @@ int GeneralRateModelDG::linearSolve(double t, double alpha, double outerTol, dou
 				// Compute tempState_i = J_{i,f} * y_f
 				_jacPF[pblk].multiplyAdd(rhs + idxr.offsetJf(), localPar);
 				// Apply J_i^{-1} to tempState_i
-				Eigen::Map<VectorXd> r(localPar, _disc.nParPoints[type]);
+				Eigen::Map<VectorXd> r(localPar, static_cast<int>(_disc.nParPoints[type]) * idxr.strideParShell(type));
 				_parSolver[type * _disc.nPoints + par].solve(r);
 				if (_parSolver[type * _disc.nPoints + par].info() != Eigen::Success)
 				{
@@ -925,7 +925,7 @@ int GeneralRateModelDG::schurComplementMatrixVector(double const* x, double* z) 
 				// Apply J_{i,f}
 				_jacPF[pblk].multiplyAdd(x, tmp);
 				// Apply J_{i}^{-1}
-				Eigen::Map<VectorXd> r(tmp, _disc.nParPoints[type]);
+				Eigen::Map<VectorXd> r(tmp, static_cast<int>(_disc.nParPoints[type]) * idxr.strideParShell(type));
 				_parSolver[type * _disc.nPoints + par].solve(r);
 				if (_parSolver[type * _disc.nPoints + par].info() != Eigen::Success)
 				{
@@ -1026,7 +1026,7 @@ void GeneralRateModelDG::assembleDiscretizedJacobianParticleBlock(unsigned int p
 
 	// Add time derivatives to particle shells
 	linalg::BandedEigenSparseRowIterator jac (_jacPdisc[_disc.nPoints * parType + pblk], 0);
-	for (unsigned int j = 0; j < _disc.nParCell[parType]; ++j)
+	for (unsigned int j = 0; j < _disc.nParNode[parType]; ++j)
 	{
 		addTimeDerivativeToJacobianParticleShell(jac, idxr, alpha, parType);
 		// Iterator jac has already been advanced to next shell
