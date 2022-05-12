@@ -671,7 +671,7 @@ int GeneralRateModelDG::linearSolve(double t, double alpha, double outerTol, dou
 		{
 			// handle inlet DOFs
 			for (int comp = 0; comp < _disc.nComp; comp++) {
-				for (int node = 0; node < (_disc.modal ? _disc.nNodes : 1); node++) {
+				for (int node = 0; node < (_disc.exactInt ? _disc.nNodes : 1); node++) {
 					r[idxr.offsetC() + comp * idxr.strideColComp() + node * idxr.strideColNode()] += _jacInlet(node, 0) * r[comp];
 				}
 			}
@@ -1204,7 +1204,7 @@ int GeneralRateModelDGFV::linearSolve(double t, double alpha, double outerTol, d
 		{
 			// handle inlet DOFs
 			for (int comp = 0; comp < _disc.nComp; comp++) {
-				for (int node = 0; node < (_disc.modal ? _disc.nNodes : 1); node++) {
+				for (int node = 0; node < (_disc.exactInt ? _disc.nNodes : 1); node++) {
 					r[idxr.offsetC() + comp * idxr.strideColComp() + node * idxr.strideColNode()] += _jacInlet(node, 0) * r[comp];
 				}
 			}

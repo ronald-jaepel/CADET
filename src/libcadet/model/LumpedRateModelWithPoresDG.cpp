@@ -122,14 +122,7 @@ bool LumpedRateModelWithPoresDG::configureModelDiscretization(IParameterProvider
 	if (_disc.polyDeg < 1)
 		throw InvalidParameterException("Polynomial degree must be at least 1!");
 
-	if (paramProvider.getString("POLYNOMIAL_BASIS") == "LAGRANGE") {
-		_disc.modal = false;
-	}
-	else if (paramProvider.getString("POLYNOMIAL_BASIS") == "JACOBI") {
-		_disc.modal = true;
-	}
-	else
-		throw InvalidParameterException("Polynomial basis must be either LAGRANGE or JACOBI");
+	_disc.exactInt = paramProvider.getBool("EXACT_INTEGRATION");
 
 	// Compute discretization
 	_disc.initializeDG();
@@ -257,7 +250,7 @@ bool LumpedRateModelWithPoresDG::configureModelDiscretization(IParameterProvider
 	// Allocate memory
 	Indexer idxr(_disc);
 
-	if (_disc.modal)
+	if (_disc.exactInt)
 		_jacInlet.resize(_disc.nNodes, 1); // first cell depends on inlet concentration (same for every component)
 	else
 		_jacInlet.resize(1, 1); // first cell depends on inlet concentration (same for every component)

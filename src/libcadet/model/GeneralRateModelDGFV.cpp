@@ -157,14 +157,7 @@ bool GeneralRateModelDGFV::configureModelDiscretization(IParameterProvider& para
 	if (_disc.polyDeg < 1)
 		throw InvalidParameterException("Polynomial degree must be at least 1!");
 
-	if (paramProvider.getString("POLYNOMIAL_BASIS") == "LAGRANGE") {
-		_disc.modal = false;
-	}
-	else if (paramProvider.getString("POLYNOMIAL_BASIS") == "JACOBI") {
-		_disc.modal = true;
-	}
-	else
-		throw InvalidParameterException("Polynomial basis must be either LAGRANGE or JACOBI");
+	_disc.exactInt = paramProvider.getBool("EXACT_INTEGRATION");
 
 	// Compute discretization
 	_disc.initializeDG();
@@ -551,7 +544,7 @@ bool GeneralRateModelDGFV::configureModelDiscretization(IParameterProvider& para
 	// Allocate memory
 	_tempState = new double[numDofs()];
 
-	if (_disc.modal)
+	if (_disc.exactInt)
 		_jacInlet.resize(_disc.nNodes, 1); // first cell depends on inlet concentration (same for every component)
 	else
 		_jacInlet.resize(1, 1); // first node depends on inlet concentration (same for every component)
@@ -1361,7 +1354,7 @@ int GeneralRateModelDGFV::residualParticle(double t, unsigned int parType, unsig
 
 	// z coordinate of current node (column length normed to 1) - needed in externally dependent adsorption kinetic
 	const double z = (_disc.deltaZ * std::floor(colNode / _disc.nNodes)
-				   + 0.5 * _disc.deltaZ * (1 + _disc.nodes[colNode % _disc.nNodes])) _disc.length_;
+				   + 0.5 * _disc.deltaZ * (1 + _disc.nodes[colNode % _disc.nNodes])) / _disc.length_;
 
 	// Reset Jacobian
 	if (wantJac)

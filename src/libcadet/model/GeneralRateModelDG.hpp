@@ -275,14 +275,14 @@ protected:
 		unsigned int polyDeg; //!< polynomial degree of column elements
 		unsigned int nNodes; //!< Number of nodes per column cell
 		unsigned int nPoints; //!< Number of discrete column Points
-		unsigned int modal;	//!< bool switch: 1 for modal basis, 0 for nodal basis
+		bool exactInt;	//!< 1 for exact integration, 0 for inexact LGL quadrature
 		unsigned int nParType; //!< Number of particle types
 		unsigned int* nParCell; //!< Array with number of radial cells in each particle type
 		unsigned int* nParPointsBeforeType; //!< Array with total number of radial points before a particle type (cumulative sum of nParPoints), additional last element contains total number of particle shells
 		unsigned int* parPolyDeg; //!< polynomial degree of particle elements
 		unsigned int* nParNode; //!< Array with number of radial nodes per cell in each particle type
 		unsigned int* nParPoints; //!< Array with number of radial nodes per cell in each particle type
-		unsigned int* parModal;	//!< bool switch: 1 for modal basis, 0 for nodal basis for each particle type
+		bool* parExactInt;	//!< 1  for exact integration, 0 for inexact LGL quadrature for each particle type
 		unsigned int* parTypeOffset; //!< Array with offsets (in particle block) to particle type, additional last element contains total number of particle DOFs
 		unsigned int* nBound; //!< Array with number of bound states for each component and particle type (particle type major ordering)
 		unsigned int* boundOffset; //!< Array with offset to the first bound state of each component in the solid phase (particle type major ordering)
@@ -298,11 +298,11 @@ protected:
 		Eigen::VectorXd nodes; //!< Array with positions of nodes in reference element
 		Eigen::MatrixXd polyDerM; //!< Array with polynomial derivative Matrix
 		Eigen::VectorXd invWeights; //!< Array with weights for numerical quadrature of size nNodes
-		Eigen::MatrixXd invMM; //!< dense !INVERSE! mass matrix for modal (exact) integration
+		Eigen::MatrixXd invMM; //!< dense inverse mass matrix for exact integration
 		Eigen::VectorXd* parNodes; //!< Array with positions of nodes in radial reference element for each particle
 		Eigen::MatrixXd* parPolyDerM; //!< Array with polynomial derivative Matrix for each particle
-		Eigen::VectorXd* parInvWeights; //!< Array with weights for numerical quadrature of size nNodes for each particle
-		Eigen::MatrixXd* parInvMM; //!< dense !INVERSE! mass matrix for modal (exact) integration for each particle
+		Eigen::VectorXd* parInvWeights; //!< Array with weights for LGL quadrature of size nNodes for each particle
+		Eigen::MatrixXd* parInvMM; //!< dense !INVERSE! mass matrix for exact integration for each particle
 
 		// vgl. convDispOperator
 		Eigen::VectorXd dispersion; //!< Column dispersion (may be section and component dependent)
@@ -318,7 +318,7 @@ protected:
 		Eigen::VectorXd g; //!< auxiliary variable g = dc / dx
 		Eigen::VectorXd* g_p; //!< auxiliary variable g = dc_p / dr
 		Eigen::VectorXd* g_pSum; //!< auxiliary variable g = sum_{k \in p, s_i} dc_k / dr
-		Eigen::VectorXd h;
+		Eigen::VectorXd h; //!< auxiliary variable h = vc - D_ax g
 		Eigen::VectorXd surfaceFlux; //!< stores the surface flux values of the bulk phase
 		Eigen::VectorXd* surfaceFluxParticle; //!< stores the surface flux values for each particle
 		Eigen::Vector4d boundary; //!< stores the boundary values from Danckwert boundary conditions of the bulk phase
@@ -999,7 +999,7 @@ protected:
 	}
 
 	/**
-	* @brief calculates the surface Integral, depending on the approach (modal/nodal)
+	* @brief calculates the surface Integral, depending on the approach (exact/inexact integration)
 	* @param [in] state relevant state vector
 	* @param [in] stateDer state derivative vector the solution is added to
 	* @param [in] aux true for auxiliary equation, false for main equation
@@ -1012,7 +1012,7 @@ protected:
 
 		// calc numerical flux values c* or h* depending on equation switch aux
 		(aux == 1) ? InterfaceFluxAuxiliary(C, strideCell, strideNode) : InterfaceFlux(C, _disc.g, Comp);
-		if (_disc.modal) { // modal approach -> dense mass matrix
+		if (_disc.exactInt) { // modal approach -> dense mass matrix
 			for (unsigned int Cell = 0; Cell < _disc.nCol; Cell++) {
 				// strong surface integral -> M^-1 B [state - state*]
 				for (unsigned int Node = 0; Node < _disc.nNodes; Node++) {
@@ -1041,7 +1041,7 @@ protected:
 
 		// calc numerical flux values
 		InterfaceFluxParticle(parType, state, strideCell, strideNode, aux, comp, Dp);
-		if (_disc.modal) { // modal approach -> dense mass matrix
+		if (_disc.exactInt) { // modal approach -> dense mass matrix
 			for (unsigned int Cell = 0; Cell < _disc.nParCell[parType]; Cell++) {
 				// strong surface integral -> M^-1 B [state - state*]
 				for (unsigned int Node = 0; Node < _disc.nParNode[parType]; Node++) {
@@ -1182,7 +1182,7 @@ protected:
 		// TODO?: convDisp NNZ times two for now, but Convection NNZ < Dispersion NNZ
 		tripletList.reserve(2u * calcConvDispNNZ(_disc));
 
-		if (_disc.modal)
+		if (_disc.exactInt)
 			ConvDispModalPattern(tripletList);
 		else
 			ConvDispNodalPattern(tripletList);
@@ -1196,7 +1196,7 @@ protected:
 		// TODO?: convDisp NNZ times two for now, but Convection NNZ < Dispersion NNZ
 		tripletList.reserve(calcParDispNNZ(parType, _disc));
 
-		if (!_disc.parModal[parType])
+		if (!_disc.parExactInt[parType])
 			calcNodalParticleJacobianPattern(parType, tripletList);
 		//else
 			//calcModalParticleJacobianPattern(parType, tripletList, mat);
@@ -1309,7 +1309,7 @@ protected:
 	}
 
 	/**
-	* @brief sets the sparsity pattern of the convection dispersion Jacobian for the modal DG scheme
+	* @brief sets the sparsity pattern of the convection dispersion Jacobian for the exact integration DG scheme
 	*/
 	int ConvDispModalPattern(std::vector<T>& tripletList) {
 
@@ -1480,7 +1480,7 @@ protected:
 		//}
 
 			// DG convection dispersion Jacobian
-		if (_disc.modal)
+		if (_disc.exactInt)
 			calcConvDispModalJacobian(_jacC);
 		else
 			calcConvDispNodalJacobian(_jacC);
@@ -1515,8 +1515,8 @@ protected:
 		//}
 
 		// DG particle dispersion Jacobian
-		if (_disc.parModal[parType])
-			throw std::invalid_argument("modal/exact integration Particle Jacobian not implemented yet");
+		if (_disc.parExactInt[parType])
+			throw std::invalid_argument("exact integration Particle Jacobian not implemented yet");
 			//calcModalParticleJacobian(parType, _jacP[parType * colNode]);
 		else
 			calcNodalParticleJacobian(parType, parDiff, parSurfDiff, invBetaP, _jacP[parType * _disc.nPoints + colNode]);
@@ -1941,7 +1941,7 @@ protected:
 	*/
 	unsigned int calcConvDispNNZ(Discretization disc) {
 
-		if (disc.modal) {
+		if (disc.exactInt) {
 			return disc.nComp * ((3u * disc.nCol - 2u) * disc.nNodes * disc.nNodes + (2u * disc.nCol - 3u) * disc.nNodes);
 		}
 		else {
@@ -1950,7 +1950,7 @@ protected:
 	}
 	unsigned int calcParDispNNZ(int parType, Discretization disc) {
 
-		if (disc.parModal) {
+		if (disc.exactInt) {
 			return disc.nComp * ((3u * disc.nParCell[parType] - 2u) * disc.nParNode[parType] * disc.nParNode[parType] + (2u * disc.nParCell[parType] - 3u) * disc.nParNode[parType]);
 		}
 		else {
@@ -2418,7 +2418,7 @@ protected:
 	}
 
 	/**
-		* @brief analytically calculates the convection dispersion jacobian for the modal DG scheme
+		* @brief analytically calculates the convection dispersion jacobian for the exact integration DG scheme
 		*/
 	int calcConvDispModalJacobian(Eigen::SparseMatrix<double, RowMajor>& jac) {
 

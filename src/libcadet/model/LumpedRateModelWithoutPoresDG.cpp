@@ -109,14 +109,7 @@ namespace cadet
 			if (_disc.polyDeg < 1)
 				throw InvalidParameterException("Polynomial degree must be at least 1!");
 
-			if (paramProvider.getString("POLYNOMIAL_BASIS") == "LAGRANGE") {
-				_disc.modal = false;
-			}
-			else if (paramProvider.getString("POLYNOMIAL_BASIS") == "JACOBI") {
-				_disc.modal = true;
-			}
-			else
-				throw InvalidParameterException("Polynomial basis must be either LAGRANGE or JACOBI");
+			_disc.exactInt = paramProvider.getBool("EXACT_INTEGRATION");
 
 			const std::vector<int> nBound = paramProvider.getIntArray("NBOUND");
 			if (nBound.size() < _disc.nComp)
@@ -170,7 +163,7 @@ namespace cadet
 			// Allocate memory
 			Indexer idxr(_disc);
 
-			if (_disc.modal)
+			if (_disc.exactInt)
 				_jacInlet.resize(_disc.nNodes, 1); // first cell depends on inlet concentration (same for every component)
 			else
 				_jacInlet.resize(1, 1); // first cell depends on inlet concentration (same for every component)
@@ -936,7 +929,7 @@ namespace cadet
 
 			// handle inlet DOFs
 			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
-				for (unsigned int node = 0; node < (_disc.modal ? _disc.nNodes : 1); node++) {
+				for (unsigned int node = 0; node < (_disc.exactInt ? _disc.nNodes : 1); node++) {
 					r[idxr.offsetC() + comp * idxr.strideColComp() + node * idxr.strideColNode()] += _jacInlet(node, 0) * r[comp];
 				}
 			}

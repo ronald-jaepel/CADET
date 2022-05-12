@@ -267,11 +267,11 @@ protected:
 		//// NOTE: no different Riemann solvers or boundary conditions
 
 		double deltaZ;
-		unsigned int modal;	//!< bool switch: 1 for modal basis, 0 for nodal basis
+		bool exactInt;	//!< 1 for exact integration, 0 for LGL quadrature
 		Eigen::VectorXd nodes; //!< Array with positions of nodes in reference element
 		Eigen::MatrixXd polyDerM; //!< Array with polynomial derivative Matrix
 		Eigen::VectorXd invWeights; //!< Array with weights for numerical quadrature of size nNodes
-		Eigen::MatrixXd invMM; //!< dense !INVERSE! mass matrix for modal (exact) integration
+		Eigen::MatrixXd invMM; //!< dense inverse mass matrix for exact integration
 
 		// vgl. convDispOperator
 		Eigen::VectorXd dispersion; //!< Column dispersion (may be section and component dependent)
@@ -835,7 +835,7 @@ protected:
 	}
 
 	/**
-	* @brief calculates the surface Integral, depending on the approach (modal/nodal)
+	* @brief calculates the surface Integral, depending on the approach (exact/inexact integration)
 	* @param [in] state relevant state vector
 	* @param [in] stateDer state derivative vector the solution is added to
 	* @param [in] aux true for auxiliary equation, false for main equation
@@ -849,7 +849,7 @@ protected:
 
 		// calc numerical flux values c* or h* depending on equation switch aux
 		(aux == 1) ? InterfaceFluxAuxiliary(C) : InterfaceFlux(C, _disc.g, Comp);
-		if (_disc.modal) { // modal approach -> dense mass matrix
+		if (_disc.exactInt) { // modal approach -> dense mass matrix
 			for (unsigned int Cell = 0; Cell < _disc.nCol; Cell++) {
 				// strong surface integral -> M^-1 B [state - state*]
 				for (unsigned int Node = 0; Node < _disc.nNodes; Node++) {
@@ -962,7 +962,7 @@ protected:
 		// TODO?: convDisp NNZ times two for now, but Convection NNZ < Dispersion NNZ
 		tripletList.reserve(2u * calcConvDispNNZ(_disc));
 
-		if (_disc.modal)
+		if (_disc.exactInt)
 			ConvDispModalPattern(tripletList);
 		else
 			ConvDispNodalPattern(tripletList);
@@ -1095,7 +1095,7 @@ protected:
 	}
 
 	/**
-	* @brief sets the sparsity pattern of the convection dispersion Jacobian for the modal DG scheme
+	* @brief sets the sparsity pattern of the convection dispersion Jacobian for the exact integration (here: modal) DG scheme
 	*/
 	int ConvDispModalPattern(std::vector<T>& tripletList) {
 
@@ -1266,7 +1266,7 @@ protected:
 		//}
 
 			// DG convection dispersion Jacobian
-		if (_disc.modal)
+		if (_disc.exactInt)
 			calcConvDispModalJacobian(_jacC);
 		else
 			calcConvDispNodalJacobian(_jacC);
@@ -1293,7 +1293,7 @@ protected:
 	*/
 	unsigned int calcConvDispNNZ(Discretization disc) {
 
-		if (disc.modal) {
+		if (disc.exactInt) {
 			return disc.nComp * ((3u * disc.nCol - 2u) * disc.nNodes * disc.nNodes + (2u * disc.nCol - 3u) * disc.nNodes);
 		}
 		else {
@@ -1761,7 +1761,7 @@ protected:
 	}
 
 	/**
-	* @brief analytically calculates the convection dispersion jacobian for the modal DG scheme
+	* @brief analytically calculates the convection dispersion jacobian for the exact integration (here: modal) DG scheme
 	*/
 	int calcConvDispModalJacobian(Eigen::SparseMatrix<double, RowMajor>& jac) {
 

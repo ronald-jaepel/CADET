@@ -158,19 +158,16 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 	if (_disc.polyDeg < 1)
 		throw InvalidParameterException("Polynomial degree must be at least 1!");
 
-	if (paramProvider.getString("POLYNOMIAL_BASIS") == "LAGRANGE") {
-		_disc.modal = false;
-	}
-	else if (paramProvider.getString("POLYNOMIAL_BASIS") == "JACOBI") {
-		_disc.modal = true;
-		throw InvalidParameterException("only inexact integration implemented for now!");
-	}
+	if (paramProvider.getBool("EXACT_INTEGRATION"))
+		_disc.exactInt = false;
 	else
-		throw InvalidParameterException("Polynomial basis must be either LAGRANGE or JACOBI");
+		throw InvalidParameterException("only inexact integration implemented for now!");
+		//_disc.exactInt = true;
+
 
 	const std::vector<int> nParCell = paramProvider.getIntArray("NPARCELL");
 	const std::vector<int> parPolyDeg = paramProvider.getIntArray("PARPOLYDEG");
-	const std::vector<bool> parModal = paramProvider.getBoolArray("PARMODAL");
+	const std::vector<bool> parModal = paramProvider.getBoolArray("PAR_EXACT_INTEGRATION");
 
 	const std::vector<int> nBound = paramProvider.getIntArray("NBOUND");
 	if (nBound.size() < _disc.nComp)
@@ -185,7 +182,7 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 	}
 
 	if ((parModal.size() > 1) && (parModal.size() < _disc.nParType))
-		throw InvalidParameterException("Field PARMODAL must have 1 or NPARTYPE (" + std::to_string(_disc.nParType) + ") entries");
+		throw InvalidParameterException("Field PAR_EXACT_INTEGRATION must have 1 or NPARTYPE (" + std::to_string(_disc.nParType) + ") entries");
 	if ((nParCell.size() > 1) && (nParCell.size() < _disc.nParType))
 		throw InvalidParameterException("Field NPARCELL must have 1 or NPARTYPE (" + std::to_string(_disc.nParType) + ") entries");
 	if ((parPolyDeg.size() > 1) && (parPolyDeg.size() < _disc.nParType))
@@ -211,15 +208,15 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 	else
 		std::copy_n(parPolyDeg.begin(), _disc.nParType, _disc.parPolyDeg);
 
-	_disc.parModal = new unsigned int[_disc.nParType];
+	_disc.parExactInt = new bool[_disc.nParType];
 	if (parModal.size() < _disc.nParType)
 	{
 		// Multiplex exact/inexact integration of particle elements to all particle types
 		for (unsigned int i = 0; i < _disc.nParType; ++i)
-			std::fill(_disc.parModal, _disc.parModal + _disc.nParType, parModal[0]);
+			std::fill(_disc.parExactInt, _disc.parExactInt + _disc.nParType, parModal[0]);
 	}
 	else
-		std::copy_n(parModal.begin(), _disc.nParType, _disc.parModal);
+		std::copy_n(parModal.begin(), _disc.nParType, _disc.parExactInt);
 
 	if ((nBound.size() > _disc.nComp) && (nBound.size() < _disc.nComp * _disc.nParType))
 		throw InvalidParameterException("Field NBOUND must have NCOMP (" + std::to_string(_disc.nComp) + ") or NCOMP * NPARTYPE (" + std::to_string(_disc.nComp * _disc.nParType) + ") entries");
@@ -581,7 +578,7 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 	// Allocate memory
 	_tempState = new double[numDofs()];
 
-	if (_disc.modal)
+	if (_disc.exactInt)
 		_jacInlet.resize(_disc.nNodes, 1); // first cell depends on inlet concentration (same for every component)
 	else
 		_jacInlet.resize(1, 1); // first node depends on inlet concentration (same for every component)
@@ -602,8 +599,8 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 	for (unsigned int j = 0; j < _disc.nParType; ++j)
 	{
 
-		if (_disc.parModal[j])
-				throw std::invalid_argument("modal/exact integration Particle Jacobian not implemented yet");
+		if (_disc.parExactInt[j])
+				throw std::invalid_argument("exact integration Particle Jacobian not implemented yet");
 		else {
 			for (int colNode = 0; colNode < _disc.nPoints; colNode++) {
 				_jacP[j * _disc.nPoints + colNode].resize(_disc.nParPoints[j] * (_disc.nComp + _disc.strideBound[j]),
@@ -1483,7 +1480,7 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 
 		Eigen::Map<VectorXd, 0, InnerStride<Dynamic>> resC_p(res + comp * idxr.strideParComp(), _disc.nParPoints[parType], InnerStride<Dynamic>(idxr.strideParShell(parType)));
 		if (_parGeomSurfToVol[parType] != SurfVolRatioSlab) { // no metric part for slab!
-			if (_disc.modal == false) {
+			if (_disc.parExactInt[parType] == false) {
 				for (int cell = 0; cell < static_cast<int>(_disc.nParCell[parType]); cell++) {
 
 					double r_L = static_cast<double>(_parRadius[parType]) - cell * _disc.deltaR[parType]; // left boundary of current cell
