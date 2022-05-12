@@ -1202,8 +1202,9 @@ namespace cadet
 				// Reuse memory of band matrix for dense matrix
 				linalg::DenseMatrixView fullJacobianMatrix(_jacDisc.valuePtr() + point * _disc.strideBound * _disc.strideBound, nullptr, mask.len, mask.len);
 
-				// z coordinate of current discrete point - needed in externally dependent adsorption kinetic
-				const double z = _disc.deltaZ * std::floor(point / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[point % _disc.nNodes]);
+				// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
+				const double z = (_disc.deltaZ * std::floor(point / _disc.nNodes)
+					+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[point % _disc.nNodes])) / _disc.length_;
 
 				// Get workspace memory
 				BufferedArray<double> nonlinMemBuffer = tlmAlloc.array<double>(_nonlinearSolver->workspaceSize(probSize));

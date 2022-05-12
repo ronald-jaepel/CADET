@@ -102,7 +102,7 @@ unsigned int GeneralRateModelDGFV::numDofs() const CADET_NOEXCEPT
 	// Column bulk DOFs: nPoints * nComp
 	// Particle DOFs: nPoints * nParType particles each having nComp (liquid phase) + sum boundStates (solid phase) DOFs
 	//                in each shell; there are nParCell shells for each particle type
-	// Flux DOFs: nPoints * nComp * nParType (as many as column bulk DOFs)
+	// Flux DOFs: nCol * nComp * nParType (column bulk DOFs times particle types)
 	// Inlet DOFs: nComp
 	return _disc.nPoints * (_disc.nComp * (1 + _disc.nParType)) + _disc.parTypeOffset[_disc.nParType] + _disc.nComp;
 }
@@ -112,7 +112,7 @@ unsigned int GeneralRateModelDGFV::numPureDofs() const CADET_NOEXCEPT
 	// Column bulk DOFs: nPoints * nComp
 	// Particle DOFs: nPoints particles each having nComp (liquid phase) + sum boundStates (solid phase) DOFs
 	//                in each shell; there are nPar shells
-	// Flux DOFs: nPoints * nComp (as many as column bulk DOFs)
+	// Flux DOFs: nCol * nComp * nParType (column bulk DOFs times particle types)
 	return _disc.nPoints * (_disc.nComp * (1 + _disc.nParType)) + _disc.parTypeOffset[_disc.nParType];
 }
 
@@ -1359,9 +1359,9 @@ int GeneralRateModelDGFV::residualParticle(double t, unsigned int parType, unsig
 	// bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2
 	active const* const parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[parType];
 
-	// z coordinate of current node - needed in externally dependent adsorption kinetic
-	const double z = _disc.deltaZ * std::floor(colNode / _disc.nNodes)
-				   + 0.5 * _disc.deltaZ * (1 + _disc.nodes[colNode % _disc.nNodes]);
+	// z coordinate of current node (column length normed to 1) - needed in externally dependent adsorption kinetic
+	const double z = (_disc.deltaZ * std::floor(colNode / _disc.nNodes)
+				   + 0.5 * _disc.deltaZ * (1 + _disc.nodes[colNode % _disc.nNodes])) _disc.length_;
 
 	// Reset Jacobian
 	if (wantJac)
@@ -1963,8 +1963,8 @@ int GeneralRateModelDGFV::residualFlux(double t, unsigned int secIdx, StateType 
 		// J_{0,f} block, adds flux to column void / bulk volume equations
 		for (unsigned int i = 0; i < _disc.nPoints * _disc.nComp; ++i)
 		{
-			const unsigned int colCell = i / _disc.nComp;
-			resCol[i] += jacCF_val * static_cast<ParamType>(_parTypeVolFrac[type + colCell * _disc.nParType]) * yFluxType[i];
+			const unsigned int colNode = i / _disc.nComp;
+			resCol[i] += jacCF_val * static_cast<ParamType>(_parTypeVolFrac[type + colNode * _disc.nParType]) * yFluxType[i];
 		}
 
 		// J_{f,0} block, adds bulk volume state c_i to flux equation

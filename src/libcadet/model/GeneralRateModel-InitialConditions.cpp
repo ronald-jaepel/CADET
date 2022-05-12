@@ -1448,10 +1448,10 @@ void GeneralRateModelDG::applyInitialCondition(const SimulationState& simState) 
 
 	double* const stateYbulk = simState.vecStateY + idxr.offsetC();
 
-	// Loop over column cells
+	// Loop over column nodes
 	for (unsigned int point = 0; point < _disc.nPoints; ++point)
 	{
-		// Loop over components in cell
+		// Loop over components at node
 		for (unsigned comp = 0; comp < _disc.nComp; ++comp)
 			stateYbulk[point * idxr.strideColNode() + comp * idxr.strideColComp()] = static_cast<double>(_initC[comp]);
 	}
@@ -1463,7 +1463,7 @@ void GeneralRateModelDG::applyInitialCondition(const SimulationState& simState) 
 		{
 			const unsigned int offset = idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ point });
 
-			// Loop over particle cells
+			// Loop over particle nodes
 			for (unsigned int shell = 0; shell < _disc.nParPoints[type]; ++shell)
 			{
 				const unsigned int shellOffset = offset + shell * idxr.strideParShell(type);
@@ -1647,8 +1647,9 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 			// Reuse memory of band matrix for dense matrix
 			linalg::DenseMatrixView fullJacobianMatrix(_jacPdisc[type * _disc.nPoints + pblk].valuePtr(), nullptr, mask.len, mask.len);
 
-			// z coordinate of current discrete point - needed in externally dependent adsorption kinetic
-			const double z = _disc.deltaZ * std::floor(pblk / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes]);
+			// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
+			const double z = (_disc.deltaZ * std::floor(pblk / _disc.nNodes)
+				+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.length_;
 
 			// Get workspace memory
 			BufferedArray<double> nonlinMemBuffer = tlmAlloc.array<double>(_nonlinearSolver->workspaceSize(probSize));
@@ -1982,8 +1983,9 @@ void GeneralRateModelDG::consistentInitialTimeDerivative(const SimulationTime& s
 		const unsigned int type = pblk / _disc.nPoints;
 		const unsigned int par = pblk % _disc.nPoints;
 
-		// z coordinate of current discrete point - needed in externally dependent adsorption kinetic
-		const double z = _disc.deltaZ * std::floor(pblk / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes]);
+		// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
+		const double z = (_disc.deltaZ * std::floor(pblk / _disc.nNodes)
+			+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.length_;
 
 		// Assemble
 		Eigen::SparseMatrix<double, RowMajor>& mat = _jacPdisc[type * _disc.nPoints + par];
@@ -2132,8 +2134,9 @@ void GeneralRateModelDG::leanConsistentInitialState(const SimulationTime& simTim
 			{
 				LinearBufferAllocator tlmAlloc = threadLocalMem.get();
 
-				// z coordinate of current discrete point - needed in externally dependent adsorption kinetic
-				const double z = _disc.deltaZ * std::floor(pblk / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes]);
+				// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
+				const double z = (_disc.deltaZ * std::floor(pblk / _disc.nNodes)
+					+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.length_;
 
 				const int localOffsetToParticle = idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ static_cast<unsigned int>(pblk) });
 				for (std::size_t shell = 0; shell < static_cast<std::size_t>(_disc.nParPoints[type]); ++shell)
@@ -2963,8 +2966,9 @@ void GeneralRateModelDGFV::consistentInitialState(const SimulationTime& simTime,
 			// Reuse memory of band matrix for dense matrix
 			linalg::DenseMatrixView fullJacobianMatrix(_jacPdisc[type * _disc.nPoints + pblk].data(), nullptr, mask.len, mask.len);
 
-			// z coordinate of current discrete point - needed in externally dependent adsorption kinetic
-			const double z = _disc.deltaZ * std::floor(pblk / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes]);
+			// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
+			const double z = (_disc.deltaZ * std::floor(pblk / _disc.nNodes)
+				+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.length_;
 
 			// Get workspace memory
 			BufferedArray<double> nonlinMemBuffer = tlmAlloc.array<double>(_nonlinearSolver->workspaceSize(probSize));
@@ -3291,8 +3295,9 @@ void GeneralRateModelDGFV::consistentInitialTimeDerivative(const SimulationTime&
 		const unsigned int type = pblk / _disc.nPoints;
 		const unsigned int par = pblk % _disc.nPoints;
 
-		// z coordinate of current discrete point - needed in externally dependent adsorption kinetic
-		const double z = _disc.deltaZ * std::floor(pblk / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes]);
+		// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
+		const double z = (_disc.deltaZ * std::floor(pblk / _disc.nNodes)
+			+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.length_;
 
 		// Assemble
 		linalg::FactorizableBandMatrix& fbm = _jacPdisc[pblk];
@@ -3440,8 +3445,9 @@ void GeneralRateModelDGFV::leanConsistentInitialState(const SimulationTime& simT
 			{
 				LinearBufferAllocator tlmAlloc = threadLocalMem.get();
 
-				// z coordinate of current discrete point - needed in externally dependent adsorption kinetic
-				const double z = _disc.deltaZ * std::floor(pblk / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes]);
+				// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
+				const double z = (_disc.deltaZ * std::floor(pblk / _disc.nNodes)
+					+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.length_;
 
 				const int localOffsetToParticle = idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ static_cast<unsigned int>(pblk) });
 				for (std::size_t shell = 0; shell < static_cast<std::size_t>(_disc.nParCell[type]); ++shell)

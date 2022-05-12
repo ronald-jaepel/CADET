@@ -1365,9 +1365,9 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 		invBetaP[comp] = (1.0 - static_cast<double>(_parPorosity[parType])) / (static_cast<double>(_poreAccessFactor[_disc.nComp * parType + comp]) * static_cast<double>(_parPorosity[parType]));
 	}
 
-	// z coordinate of current node - needed in externally dependent adsorption kinetic
-	const double z = _disc.deltaZ * std::floor(colNode / _disc.nNodes)
-		+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[colNode % _disc.nNodes]);
+	// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
+	const double z = (_disc.deltaZ * std::floor(colNode / _disc.nNodes)
+		+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[colNode % _disc.nNodes])) / _disc.length_;
 
 	// The RowIterator is always centered on the main diagonal.
 	// This means that jac[0] is the main diagonal, jac[-1] is the first lower diagonal,
@@ -1410,9 +1410,10 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 		double const* local_yDot = yDotBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) + par * idxr.strideParShell(parType);
 		ResidualType* local_res = resBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) + par * idxr.strideParShell(parType);
 
-		// r (particle) coordinate of current node - needed in externally dependent adsorption kinetic
-		const double r = _disc.deltaR[parType] * std::floor(par / _disc.nParNode[parType])
-			+ 0.5 * _disc.deltaR[parType] * (1 + _disc.parNodes[parType][par % _disc.nParNode[parType]]);
+		// r (particle) coordinate of current node (particle radius normed to 1) - needed in externally dependent adsorption kinetic
+		const double r = (_disc.deltaR[parType] * std::floor(par / _disc.nParNode[parType])
+			+ 0.5 * _disc.deltaR[parType] * (1 + _disc.parNodes[parType][par % _disc.nParNode[parType]]))
+			/ (static_cast<double>(_parRadius[parType]) - static_cast<double>(_parCoreRadius[parType]));
 		const ColumnPosition colPos{ z, 0.0, r };
 
 		// Handle time derivatives, binding, dynamic reactions

@@ -1572,8 +1572,9 @@ void LumpedRateModelWithPoresDG::consistentInitialState(const SimulationTime& si
 			// Reuse memory of band matrix for dense matrix
 			linalg::DenseMatrixView fullJacobianMatrix(_jacPdisc[type].data() + pblk * mask.len * mask.len, nullptr, mask.len, mask.len);
 
-			// z coordinate of current discrete point - needed in externally dependent adsorption kinetic
-			const double z = _disc.deltaZ * std::floor(pblk / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes]);
+			// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
+			const double z = (_disc.deltaZ * std::floor(pblk / _disc.nNodes)
+				+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.length_;
 
 			// Get workspace memory
 			BufferedArray<double> nonlinMemBuffer = tlmAlloc.array<double>(_nonlinearSolver->workspaceSize(probSize));
@@ -1913,8 +1914,9 @@ void LumpedRateModelWithPoresDG::consistentInitialTimeDerivative(const Simulatio
 		_jacPdisc[type].setAll(0.0);
 		for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
 		{
-			// z coordinate of current discrete point - needed in externally dependent adsorption kinetic
-			const double z = _disc.deltaZ * std::floor(pblk / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes]);
+			// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
+			const double z = (_disc.deltaZ * std::floor(pblk / _disc.nNodes)
+				+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.length_;
 
 			// Assemble
 			linalg::FactorizableBandMatrix::RowIterator jac = _jacPdisc[type].row(idxr.strideParBlock(type) * pblk);

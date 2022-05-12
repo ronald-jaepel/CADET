@@ -1050,9 +1050,9 @@ int LumpedRateModelWithPoresDG::residualParticle(double t, unsigned int parType,
 	// Prepare parameters
 	const ParamType radius = static_cast<ParamType>(_parRadius[parType]);
 
-	// z coordinate of current node - needed in externally dependent adsorption kinetic
-	const double z = _disc.deltaZ * std::floor(colNode / _disc.nNodes)
-		+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[colNode % _disc.nNodes]);
+	// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
+	const double z = (_disc.deltaZ * std::floor(colNode / _disc.nNodes)
+		+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[colNode % _disc.nNodes])) / _disc.length_;
 
 	const parts::cell::CellParameters cellResParams
 	{
