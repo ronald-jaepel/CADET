@@ -214,6 +214,16 @@ The models also differ in whether a mobile phase modifier (e.g., salt) is suppor
      - ✓
      - ✓
      - ✓
+   * - :ref:`multi_component_sips_model`
+     - ✓
+     - ×
+     - ✓
+     - ×
+   * - :ref:`multi_component_ldf_freundlich_model`
+     - ✓
+     - ×
+     - ✓
+     - ×
 
 
 .. toctree::

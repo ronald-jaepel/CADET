@@ -94,6 +94,8 @@ set(LIBCADET_BINDINGMODEL_SOURCES
 	${CMAKE_SOURCE_DIR}/src/libcadet/model/binding/MultiComponentSpreadingBinding.cpp
 	${CMAKE_SOURCE_DIR}/src/libcadet/model/binding/GeneralizedIonExchangeBinding.cpp
 	${CMAKE_SOURCE_DIR}/src/libcadet/model/binding/ColloidalBinding.cpp
+	${CMAKE_SOURCE_DIR}/src/libcadet/model/binding/MultiComponentLDFFreundlichBinding.cpp
+	${CMAKE_SOURCE_DIR}/src/libcadet/model/binding/SipsBinding.cpp
 )
 
 # LIBCADET_REACTIONMODEL_SOURCES holds all source files of reaction models
