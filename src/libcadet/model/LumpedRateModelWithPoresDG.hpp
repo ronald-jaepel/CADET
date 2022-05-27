@@ -1396,8 +1396,11 @@ protected:
 		}
 		else { // special case
 			dispBlock.setZero();
-			dispBlock.block(0, nNodes, nNodes, nNodes) = _disc.polyDerM * _disc.polyDerM;
-			dispBlock *= 2 / _disc.deltaZ;
+			MatrixXd GBlock1Cell = _disc.polyDerM * 2.0 / _disc.deltaZ;
+			dispBlock.block(0, nNodes, nNodes, nNodes) = _disc.polyDerM * GBlock1Cell;
+			dispBlock.block(0, nNodes, 1, nNodes) += _disc.invWeights[0] * GBlock1Cell.block(0, 0, 1, nNodes);
+			dispBlock.block(nNodes - 1, nNodes, 1, nNodes) -= _disc.invWeights[_disc.polyDeg] * GBlock1Cell.block(nNodes - 1, 0, 1, nNodes);
+			dispBlock *= 2.0 / _disc.deltaZ;
 			// copy *-1 to Jacobian
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
