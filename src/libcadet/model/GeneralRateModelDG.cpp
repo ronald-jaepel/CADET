@@ -60,16 +60,10 @@ constexpr double SurfVolRatioSphere = 3.0;
 constexpr double SurfVolRatioCylinder = 2.0;
 constexpr double SurfVolRatioSlab = 1.0;
 
-int schurComplementMultiplierGRM_DG(void* userData, double const* x, double* z)
-{
-	GeneralRateModelDG* const grm = static_cast<GeneralRateModelDG*>(userData);
-	return grm->schurComplementMatrixVector(x, z);
-}
-
 
 GeneralRateModelDG::GeneralRateModelDG(UnitOpIdx unitOpIdx) : UnitOperationBase(unitOpIdx),
 	_hasSurfaceDiffusion(0, false), _dynReactionBulk(nullptr),
-	_jacP(nullptr), _jacPdisc(nullptr), _jacPF(nullptr), _jacFP(nullptr), _jacInlet(), _hasParDepSurfDiffusion(false),
+	_globalJac(), _globalJacDisc(), _jacInlet(), _hasParDepSurfDiffusion(false),
 	_analyticJac(true), _jacobianAdDirs(0), _factorizeJacobian(false), _tempState(nullptr),
 	_initC(0), _initCp(0), _initQ(0), _initState(0), _initStateDot(0)
 {
@@ -79,11 +73,8 @@ GeneralRateModelDG::~GeneralRateModelDG() CADET_NOEXCEPT
 {
 	delete[] _tempState;
 
-	delete[] _jacPF;
-	delete[] _jacFP;
-
-	delete[] _jacP;
-	delete[] _jacPdisc;
+	//_globalJac.~SparseMatrix(); // TODO: deconstruction doesnt work somehow
+	//_globalJacDisc.~SparseMatrix();
 
 	delete _dynReactionBulk;
 
@@ -158,12 +149,7 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 	if (_disc.polyDeg < 1)
 		throw InvalidParameterException("Polynomial degree must be at least 1!");
 
-	if (paramProvider.getBool("EXACT_INTEGRATION"))
-		_disc.exactInt = false;
-	else
-		throw InvalidParameterException("only inexact integration implemented for now!");
-		//_disc.exactInt = true;
-
+	_disc.exactInt = paramProvider.getBool("EXACT_INTEGRATION");
 
 	const std::vector<int> nParCell = paramProvider.getIntArray("NPARCELL");
 	const std::vector<int> parPolyDeg = paramProvider.getIntArray("PARPOLYDEG");
@@ -351,10 +337,6 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 			throw InvalidParameterException("Field PAR_BOUNDARY_ORDER is out of valid range (1 or 2)");
 	}
 
-	// Initialize and configure GMRES for solving the Schur-complement
-	_gmres.initialize(_disc.nPoints * _disc.nComp * _disc.nParType, paramProvider.getInt("MAX_KRYLOV"), linalg::toOrthogonalization(paramProvider.getInt("GS_TYPE")), paramProvider.getInt("MAX_RESTARTS"));
-	_gmres.matrixVectorMultiplier(&schurComplementMultiplierGRM_DG, this);
-	_schurSafety = paramProvider.getDouble("SCHUR_SAFETY");
 
 	// Allocate space for initial conditions
 	_initC.resize(_disc.nComp);
@@ -582,64 +564,16 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 		_jacInlet.resize(_disc.nNodes, 1); // first cell depends on inlet concentration (same for every component)
 	else
 		_jacInlet.resize(1, 1); // first node depends on inlet concentration (same for every component)
-	_jacC.resize(_disc.nComp * _disc.nPoints, _disc.nComp * _disc.nPoints);
-	_jacCdisc.resize(_disc.nComp * _disc.nPoints, _disc.nComp * _disc.nPoints);
-	setConvDispJacPattern(_jacC);
-	setConvDispJacPattern(_jacCdisc);
+
+	// set jacobian pattern
+	_globalJacDisc.resize(numDofs(), numDofs());
+	_globalJac.resize(numDofs(), numDofs());
+	setJacobianPattern_GRM(_globalJacDisc);//todo
+	setJacobianPattern_GRM(_globalJac);
 
 	// the solver repetitively solves the linear system with a static pattern of the jacobian (set above). 
 	// The goal of analyzePattern() is to reorder the nonzero elements of the matrix, such that the factorization step creates less fill-in
-	_bulkSolver.analyzePattern(_jacCdisc);
-
-	_jacP = new Eigen::SparseMatrix<double, RowMajor>[_disc.nPoints * _disc.nParType];
-	_jacPdisc = new Eigen::SparseMatrix<double, RowMajor>[_disc.nPoints * _disc.nParType];
-	_parSolver = new Eigen::SparseLU<Eigen::SparseMatrix<double>>[_disc.nPoints * _disc.nParType];
-
-	// set particle jacobian pattern
-	for (unsigned int j = 0; j < _disc.nParType; ++j)
-	{
-
-		if (_disc.parExactInt[j])
-				throw std::invalid_argument("exact integration Particle Jacobian not implemented yet");
-		else {
-			for (int colNode = 0; colNode < _disc.nPoints; colNode++) {
-				_jacP[j * _disc.nPoints + colNode].resize(_disc.nParPoints[j] * (_disc.nComp + _disc.strideBound[j]),
-													   _disc.nParPoints[j] * (_disc.nComp + _disc.strideBound[j]));
-				_jacPdisc[j * _disc.nPoints + colNode].resize(_disc.nParPoints[j] * (_disc.nComp + _disc.strideBound[j]),
-														   _disc.nParPoints[j] * (_disc.nComp + _disc.strideBound[j]));
-				setParDispJacPattern(j, _jacP[j * _disc.nPoints + colNode]);
-				// _jacPdisc pattern needs to be reset after consistent initialization. so its probably unnecessary to also set the pattern here.
-				setParDispJacPattern(j, _jacPdisc[j * _disc.nPoints + colNode]);
-				_parSolver[j * _disc.nPoints + colNode].analyzePattern(_jacPdisc[j * _disc.nPoints + colNode]);
-			}
-		}
-	}
-	//std::cout << std::fixed << std::setprecision(0) << "jacP\n" << _jacP[0].toDense() << std::endl; // #include <iomanip>
-	_jacPF = new linalg::DoubleSparseMatrix[_disc.nPoints * _disc.nParType];
-	_jacFP = new linalg::DoubleSparseMatrix[_disc.nPoints * _disc.nParType];
-	for (unsigned int i = 0; i < _disc.nPoints * _disc.nParType; ++i)
-	{
-		_jacPF[i].resize(_disc.nComp);
-		const int type = i / _disc.nPoints;
-
-		int nonZeroFP = _disc.nComp;
-		// @TODO: why?
-		//if (_hasSurfaceDiffusion[type] && _binding[type]->hasQuasiStationaryReactions() && (_disc.nParCell[type] > 1))
-		//{
-		//	// Contribution of surface diffusion gradient
-		//	nonZeroFP += 2 * _disc.strideBound[type];
-		//	if (_parDepSurfDiffusion[type])
-		//	{
-		//		// Contribution of nonlinear surface diffusion coefficient
-		//		nonZeroFP += _parDepSurfDiffusion[type]->jacobianElementsPerRowCombined() * _disc.strideBound[type];
-		//	}
-		//}
-
-		_jacFP[i].resize(nonZeroFP);
-	}
-
-	_jacCF.resize(_disc.nComp * _disc.nPoints* _disc.nParType);
-	_jacFC.resize(_disc.nComp * _disc.nPoints* _disc.nParType);
+	_globalSolver.analyzePattern(_globalJacDisc.block(_disc.nComp, _disc.nComp, numPureDofs(), numPureDofs()));
 
 	_discParFlux.resize(sizeof(active) * _disc.nComp);
 
@@ -1118,9 +1052,9 @@ int GeneralRateModelDG::residual(const SimulationTime& simTime, const ConstSimul
 	{
 		_factorizeJacobian = true;
 
-		// Variable surface diffusion requires reassembly of flux particle Jacobians
-		if (_hasParDepSurfDiffusion)
-			assembleOffdiagJacFluxParticle(simTime.t, simTime.secIdx, simState.vecStateY);
+		//// Variable surface diffusion requires reassembly of flux particle Jacobians // TODO 
+		//if (_hasParDepSurfDiffusion)
+		//	assembleOffdiagJacFluxParticle(simTime.t, simTime.secIdx, simState.vecStateY);
 
 #ifndef CADET_CHECK_ANALYTIC_JACOBIAN
 		if (_analyticJac)
@@ -1220,8 +1154,18 @@ int GeneralRateModelDG::residual(const SimulationTime& simTime, const ConstSimul
 template <typename StateType, typename ResidualType, typename ParamType, bool wantJac>
 int GeneralRateModelDG::residualImpl(double t, unsigned int secIdx, StateType const* const y, double const* const yDot, ResidualType* const res, util::ThreadLocalStorage& threadLocalMem)
 {
-	// determine wether we have a section switch. If so, set velocity, dispersion, newStaticJac(bulk)
+	// determine wether we have a section switch. If so, set velocity, dispersion, newStaticJac
 	updateSection(secIdx);
+
+	//double* const resPtr = reinterpret_cast<double* const>(res);// todo delete
+	//const double* const yPtr = reinterpret_cast<const double* const>(y);// todo delete
+	//const double* const ypPtr = reinterpret_cast<const double* const>(yDot);// todo delete
+	//Eigen::Map<Eigen::VectorXd> resi(resPtr, numDofs());// todo delete
+	//resi.setZero();// todo delete
+	//// TODO: delete
+	//Eigen::Map<const VectorXd> y_(reinterpret_cast<const double*>(y), numDofs());
+	//Eigen::Map<VectorXd> res_(reinterpret_cast<double*>(res), numDofs());
+	//Indexer idxr(_disc);
 
 	residualBulk<StateType, ResidualType, ParamType, wantJac>(t, secIdx, y, yDot, res, threadLocalMem);
 
@@ -1229,9 +1173,9 @@ int GeneralRateModelDG::residualImpl(double t, unsigned int secIdx, StateType co
 
 	for (unsigned int pblk = 0; pblk < _disc.nPoints * _disc.nParType; ++pblk)
 	{
-			const unsigned int type = pblk / _disc.nPoints;
-			const unsigned int par = pblk % _disc.nPoints;
-			residualParticle<StateType, ResidualType, ParamType, wantJac>(t, type, par, secIdx, y, yDot, res, threadLocalMem);
+		const unsigned int type = pblk / _disc.nPoints;
+		const unsigned int par = pblk % _disc.nPoints;
+		residualParticle<StateType, ResidualType, ParamType, wantJac>(t, type, par, secIdx, y, yDot, res, threadLocalMem);
 	}
 
 	BENCH_STOP(_timerResidualPar);
@@ -1244,16 +1188,21 @@ int GeneralRateModelDG::residualImpl(double t, unsigned int secIdx, StateType co
 		res[i] = y[i];
 	}
 
-	for (int par = 0; par < _disc.nParType * _disc.nPoints; par++) {
-		if (!_jacP[par].isApprox(_jacP[0], 1e-12)) {
-			std::cout << "ParJac not the same for: " << par << std::endl;
-			std::cout << "ParJac: " << _jacP[par] << std::endl;
-		}
+	// estimate new static (per section) jacobian
+	if (wantJac && _disc.newStaticJac) {
+
+		//setJacobianPattern_GRM(_globalJac);//todo delete
+
+		bool success = calcStaticAnaJacobian_GRM(secIdx);
+		_disc.newStaticJac = false;
+
+		if (cadet_unlikely(!success))
+			LOG(Error) << "Jacobian pattern did not fit the Jacobian estimation";
+
 	}
 
-	//Eigen::Map<const VectorXd> y_(reinterpret_cast<const double*>(y), numDofs());
-	//Eigen::Map<VectorXd> res_(reinterpret_cast<double*>(res), numDofs());
-	//Indexer idxr(_disc);
+
+	//// todo delete
 	//if(!yDot)
 	//	std::cout << "consistent initialization" << std::endl;
 	//std::cout << "y,  res" << std::endl;
@@ -1278,39 +1227,30 @@ int GeneralRateModelDG::residualBulk(double t, unsigned int secIdx, StateType co
 {
 	Indexer idxr(_disc);
 
-	if (wantJac && _disc.newStaticJac) { // ConvDisp static (per section) jacobian
-
-		bool success = calcStaticAnaBulkJacobian(t, secIdx, reinterpret_cast<const double*>(yBase), threadLocalMem);
-		_disc.newStaticJac = false;
-		if (cadet_unlikely(!success))
-			LOG(Error) << "Jacobian pattern did not fit the Jacobian estimation for bulk block";
-
-	}
-
 	// Eigen access to data pointers
 	const double* yPtr = reinterpret_cast<const double*>(yBase);
 	const double* const ypPtr = reinterpret_cast<const double* const>(yDotBase);
 	double* const resPtr = reinterpret_cast<double* const>(resBase);
-	Eigen::Map<const Eigen::VectorXd> y(yPtr, numDofs());
-	Eigen::Map<const Eigen::VectorXd> yp(ypPtr, numDofs());
-	Eigen::Map<Eigen::VectorXd> res(resPtr, numDofs());
+	//Eigen::Map<const Eigen::VectorXd> y(yPtr, numDofs());//TODO: delete
+	//Eigen::Map<const Eigen::VectorXd> yp(ypPtr, numDofs());
+	//Eigen::Map<Eigen::VectorXd> res(resPtr, numDofs());
 
 	for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
 
 		// extract current component mobile phase, mobile phase residual, mobile phase derivative (discontinous memory blocks)
-		Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> C_comp(yPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-		Eigen::Map<VectorXd, 0, InnerStride<Dynamic>>		cRes_comp(resPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-		Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> cDot_comp(ypPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
+		Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> cl_comp(yPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
+		Eigen::Map<VectorXd, 0, InnerStride<Dynamic>>		clRes_comp(resPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
+		Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> clDot_comp(ypPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
 
 		/*	convection dispersion RHS	*/
 
 		_disc.boundary[0] = yPtr[comp]; // copy inlet DOFs to ghost node
-		ConvDisp_DG(C_comp, cRes_comp, t, comp);
+		ConvDisp_DG(cl_comp, clRes_comp, t, comp);
 
 		/*	residual	*/
 
 		if (ypPtr) // NULLpointer for consistent initialization
-			cRes_comp = cDot_comp - cRes_comp;
+			clRes_comp = clDot_comp - clRes_comp;
 	}
 
 	if (!_dynReactionBulk || (_dynReactionBulk->numReactionsLiquid() == 0))
@@ -1346,6 +1286,11 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 
 	LinearBufferAllocator tlmAlloc = threadLocalMem.get();
 
+	// special case: individual treatment of time derivatives in particle mass balance at inner particle boundary node
+	bool specialCase = 0;
+	if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab && _parCoreRadius[parType] == 0.0)
+		specialCase = 1;
+
 	// initialize particle residual
 	Eigen::Map<VectorXd> parResidual(reinterpret_cast<double*> (resBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode })), idxr.strideParBlock(parType));
 	parResidual.setZero();
@@ -1355,7 +1300,7 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 
 	// Ordering of particle surface diffusion:
 	// bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2
-	active const* const parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[parType];
+	active const* const _parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[parType];
 
 	double* invBetaP = new double[_disc.nComp];
 	for (int comp = 0; comp < _disc.nComp; comp++) {
@@ -1371,29 +1316,7 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 	// and jac[1] is the first upper diagonal. We can also access the rows from left to
 	// right beginning with the last lower diagonal moving towards the main diagonal and
 	// continuing to the last upper diagonal by using the native() method.
-	linalg::BandedEigenSparseRowIterator jac(_jacP[_disc.nParPoints[parType] * parType + colNode], 0);
-
-	// estimate (static) surface and pore diffusion part of particle jaobians if required. Binding part is handled in residual Kernel.
-	if (wantJac && _disc.newStaticJacP[parType * _disc.nCol + colNode]) {
-		// Reset Jacobian
-		double* vPtr = _jacP[_disc.nPoints * parType + colNode].valuePtr();
-		for (int i = 0; i < _jacP[_disc.nPoints * parType + colNode].nonZeros(); i++) {
-			vPtr[i] = 0.0;
-		}
-
-		bool success = calcStaticAnaParticleJacobian(parType, reinterpret_cast<const double* const>(parDiff), reinterpret_cast<const double* const>(parSurfDiff),
-			invBetaP, colNode, t, secIdx, reinterpret_cast<const double* const>(yBase), threadLocalMem);
-		if (cadet_unlikely(!success))
-			LOG(Error) << "Jacobian pattern did not fit the Jacobian estimation for particle block " << parType;
-
-		_disc.newStaticJacP[parType * _disc.nCol + colNode] = false;
-	}
-
-	// not needed for DG ?
-	//active const* const outerSurfPerVol = _parOuterSurfAreaPerVolume.data() + _disc.nParPointsBeforeType[parType];
-	//active const* const innerSurfPerVol = _parInnerSurfAreaPerVolume.data() + _disc.nParPointsBeforeType[parType];
-	//active const* const parCenterRadius = _parCenterRadius.data() + _disc.nParCellsBeforeType[parType];
-	//std::cout << "res_prev\n" << parResidual << std::endl;
+	linalg::BandedEigenSparseRowIterator jac(_globalJac, idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }));
 
 	int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 	const parts::cell::CellParameters cellResParams = makeCellResidualParams(parType, qsReaction);
@@ -1404,7 +1327,7 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 	{
 		// local Pointers to current particle node, needed in residualKernel
 		StateType const* local_y = yBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) + par * idxr.strideParShell(parType);
-		double const* local_yDot = yDotBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) + par * idxr.strideParShell(parType);
+		double const* local_yDot = yDotBase ? yDotBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) + par * idxr.strideParShell(parType) : nullptr;
 		ResidualType* local_res = resBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) + par * idxr.strideParShell(parType);
 
 		// r (particle) coordinate of current node (particle radius normed to 1) - needed in externally dependent adsorption kinetic
@@ -1413,107 +1336,96 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 			/ (static_cast<double>(_parRadius[parType]) - static_cast<double>(_parCoreRadius[parType]));
 		const ColumnPosition colPos{ z, 0.0, r };
 
-		// Handle time derivatives, binding, dynamic reactions
+		// Handle time derivatives, binding, dynamic reactions.
+		// Dont add time derivatives to inner boundary particle node mass balance equation for special case. This can be achieved by setting yDot pointer to null.
+		if (cadet_unlikely(par == 0 && specialCase)) local_yDot = nullptr; // TODO Check Treatment of reactions (do we need yDot then?)
+		
 		parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandedEigenSparseRowIterator, wantJac, true>(
-			t, secIdx, colPos, local_y, yDotBase ? local_yDot : nullptr, local_res, jac, cellResParams, tlmAlloc
+			t, secIdx, colPos, local_y, local_yDot, local_res, jac, cellResParams, tlmAlloc
 			);
 
 		// move rowiterator to next particle node
 		jac += idxr.strideParShell(parType);
 	}
 
-	// We still need to handle transport/diffusion and quasi-stationary reactions
+	// We still need to handle transport/diffusion
 
-	// Geometry
-	//@TODO: not needed for DG ?
-	//const ParamType outerAreaPerVolume = static_cast<ParamType>(outerSurfPerVol[par]);
-	//const ParamType innerAreaPerVolume = static_cast<ParamType>(innerSurfPerVol[par]);
-
-	// Go to the particle block of the given column node
-	const double* y = reinterpret_cast<const double*>(yBase) + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
-	const double* yDot = yDotBase + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
-	double* res = reinterpret_cast<double*>(resBase) + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
+	// get pointers to the particle block of the current column node, particle type
+	const double* c_p = reinterpret_cast<const double*>(yBase) + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
+	double* resC_p = reinterpret_cast<double*>(resBase) + idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
 
 	// Mobile phase RHS
-	for (unsigned int comp = 0; comp < _disc.nComp; comp++)
+
+	// get film diffusion flux at current node to compute boundary condition
+	_disc.localFlux = reinterpret_cast<const double*>(yBase) + idxr.offsetJf(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
+
+	int nNodes = _disc.nParNode[parType];
+	int nCells = _disc.nParCell[parType];
+	int nPoints = _disc.nParPoints[parType];
+	int nComp = _disc.nComp;
+
+	int strideParLiquid = idxr.strideParLiquid();
+	int strideParShell = idxr.strideParShell(parType);
+
+	for (unsigned int comp = 0; comp < nComp; comp++)
 	{
-		const unsigned int nBound = _disc.nBound[_disc.nComp * parType + comp];
+		// Ordering of surface Diffusion:
+		// bnd0comp0, bnd1comp0, ...
+		const Eigen::VectorXd parSurfDiff = getParDiffComp(parType, comp, parDiff, _parSurfDiff).segment(1, _disc.nBound[parType * _disc.nComp + comp]);
 
-		const double dp = static_cast<double>(parDiff[comp]);
-
-		// ====================================================================================//
-		// solve auxiliary systems d_p g_p + d_s sum g_s= d (d_p c_p + d_ s sum c_s) / d r     //
-		// ====================================================================================//
+		// =====================================================================================================//
+		// solve auxiliary systems d_p g_p + d_s beta_p sum g_s= d (d_p c_p + d_s beta_p sum c_s) / d xi		//
+		// =====================================================================================================//
 		// component-wise! strides
-		unsigned int strideCell = _disc.nParNode[parType];
+		unsigned int strideCell = nNodes;
 		unsigned int strideNode = 1u;
 		_disc.g_pSum[parType].setZero();
-		
-		// handle liquid concentration first. get relevant concentration vector
-		Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> c_p(y + comp * idxr.strideParComp(), _disc.nParPoints[parType], InnerStride<Dynamic>(idxr.strideParShell(parType)));
-		
-		// compute g_p = d c_p / d r
-		solve_auxiliary_DG(parType, c_p, strideCell, strideNode);
-		
-		// multiply with dispersion parameter and add to sum 
-		_disc.g_pSum[parType] += _disc.g_p[parType] * dp;
+		_disc.g_p[parType].setZero();
 
-		//std::cout << "c_p\n" << c_p << std::endl;
-		//std::cout << "D\n" << _disc.parPolyDerM[parType] << std::endl;
-		//std::cout << "g_sum\n" << _disc.g_pSum[parType] << std::endl;
+		Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> cp(c_p + comp, _disc.nParPoints[parType], InnerStride<Dynamic>(idxr.strideParShell(parType)));
 
-		// handle bound states (with surface diffusion, the residual from the particle equation depends on all bound states)
+		// compute g_p = d c_p / d xi
+		solve_auxiliary_DG(parType, cp, strideCell, strideNode, comp);
+
+		// multiply with dispersion parameter and add to sum -> gSum = d_p * (D c - M^-1 B [c - c^*])
+		_disc.g_pSum[parType] += _disc.g_p[parType] * static_cast<const double>(parDiff[comp]);
+
+		// handle surface diffusion
 		if (_hasSurfaceDiffusion[parType]) {
-			for (int bnd = 0; bnd < _disc.strideBound[parType]; bnd++) {
-				// get relevant concentration vector
-				Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> q_p(y + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd,
-																		_disc.nParPoints[parType], InnerStride<Dynamic>(idxr.strideParShell(parType)));
-				// compute g_s = d c_s / d r
-				solve_auxiliary_DG(parType, q_p, strideCell, strideNode);
-				// we also apply the dispersion parameter and inverse beta and then add to auxiliary sum
-				_disc.g_pSum[parType] += _disc.g_p[parType] * static_cast<double>(parSurfDiff[bnd]) * invBetaP[comp];
+			for (int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
+				// get solid phase vector
+				Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> q_p(c_p + strideParLiquid + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd,
+					_disc.nParPoints[parType], InnerStride<Dynamic>(strideParShell));
+				// compute g_s = d c_s / d xi
+				solve_auxiliary_DG(parType, q_p, strideCell, strideNode, comp);
+				// apply invBeta_p, d_s and add to sum -> gSum += d_s * invBeta_p * (D c - M^-1 B [c - c^*])
+				_disc.g_pSum[parType] += _disc.g_p[parType] * invBetaP[comp] * parSurfDiff[bnd];
 			}
 		}
-		// ====================================================================================//
-		// solve first/metric part of RHS: M^-1 M_r g_pSum									   //
-		// ====================================================================================//
 
-		Eigen::Map<VectorXd, 0, InnerStride<Dynamic>> resC_p(res + comp * idxr.strideParComp(), _disc.nParPoints[parType], InnerStride<Dynamic>(idxr.strideParShell(parType)));
-		if (_parGeomSurfToVol[parType] != SurfVolRatioSlab) { // no metric part for slab!
-			if (_disc.parExactInt[parType] == false) {
-				for (int cell = 0; cell < static_cast<int>(_disc.nParCell[parType]); cell++) {
+		Eigen::Map<VectorXd, 0, InnerStride<Dynamic>> resCp(resC_p + comp, _disc.nParPoints[parType], InnerStride<Dynamic>(idxr.strideParShell(parType)));
+		resCp.setZero();
 
-					double r_L = static_cast<double>(_parRadius[parType]) - cell * _disc.deltaR[parType]; // left boundary of current cell
-
-					for (int node = 0; node < static_cast<int>(_disc.nParNode[parType]); node++) {
-						double fac = (_parGeomSurfToVol[parType] - 1.0) / (r_L + (_disc.deltaR[parType] / 2.0) * (_disc.parNodes[parType][node] + 1.0)); // -> diag(M^-1 * M_r)
-						// substract RHS
-						resC_p[cell * _disc.nParNode[parType] + node] -= fac * _disc.g_pSum[parType][cell * _disc.nParNode[parType] + node];
-					}
-				}
-			}
-			else {
-				//@TODO: implement exact integration
-			}
-		}
 		// ====================================================================================//
-		// solve partial integration part of RHS											   //
+		// solve particle equation															   //
 		// ====================================================================================//
 
-		_disc.g_pSum[parType] *= 2 / _disc.deltaR[parType]; // multiply with inverse mapping
+		//_disc.g_pSum[parType] *= 2.0 / deltaR * 2.0 / deltaR; // squared inverse mapping -> gSum = - invMap^2 * (d_p * c^p + sum_mi d_s invBeta_p c^s)
 
 		Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> _g_pSum(&_disc.g_pSum[parType][0], _disc.nParPoints[parType], InnerStride<Dynamic>(1));
-		//std::cout << "res_prev\n" << resC_p << std::endl;
 
-		parVolumeIntegral(parType, _g_pSum, resC_p); // adds - D * (g_sum) to the residual
+		// adds - D_r * (g_sum) to the residual, including metric part. -> res = - D_r * (d_p * c^p + invBeta_p sum_mi d_s c^s)
+		parVolumeIntegral(parType, false, _g_pSum, resCp);
 
-		// get the local flux value to implement film diffusion boundary condition
-		_disc.localFlux = reinterpret_cast<const double*>(yBase) + idxr.offsetJf(ParticleTypeIndex{ parType }) + colNode;
+		// adds M^-1 B (g_sum - g_sum^*) to the residual -> res = - D_r * (d_p * c^p + invBeta_p sum_mi d_s c^s) + M^-1 B (g_sum - g_sum^*)
+		parSurfaceIntegral(parType, _g_pSum, resCp, strideCell, strideNode, false, comp);
 
-		parSurfaceIntegral(parType, _g_pSum, resC_p, strideCell, strideNode, false, static_cast<double>(parDiff[comp]), comp); // adds M^-1 B (g_sum - g_sum^*) to the residual
+		// squared inverse mapping -> res = invMap^2 * I_r [ - D * (d_p * c^p + invBeta_p sum_mi d_s c^s) + M^-1 B (g_sum - g_sum^*) ]
+		resCp *= 2.0 / _disc.deltaR[parType] * 2.0 / _disc.deltaR[parType];
 
-		//std::cout << "res_after\n" << resC_p << std::endl;
-
+		// isotherm (nBound = nComp)
+		Eigen::Map<VectorXd, 0, InnerStride<Dynamic>> qRes(resC_p + idxr.strideParLiquid() + comp, _disc.nParPoints[parType], InnerStride<Dynamic>(idxr.strideParShell(parType)));
+		qRes.setZero();
 	}
 
 	return 0;
@@ -1537,9 +1449,6 @@ int GeneralRateModelDG::residualFlux(double t, unsigned int secIdx, StateType co
 	for (unsigned int i = 0; i < _disc.nComp * _disc.nPoints * _disc.nParType; ++i)
 		resFlux[i] = yFlux[i];
 
-	// Discretized film diffusion kf
-	ParamType* const kf = _discParFlux.create<ParamType>(_disc.nComp);
-
 	for (unsigned int type = 0; type < _disc.nParType; ++type)
 	{
 		ResidualType* const resParType = resBase + idxr.offsetCp(ParticleTypeIndex{type});
@@ -1557,30 +1466,16 @@ int GeneralRateModelDG::residualFlux(double t, unsigned int secIdx, StateType co
 		active const* const parDiff = getSectionDependentSlice(_parDiffusion, _disc.nComp * _disc.nParType, secIdx) + type * _disc.nComp;
 
 		const ParamType surfaceToVolumeRatio = _parGeomSurfToVol[type] / static_cast<ParamType>(_parRadius[type]);
-		const ParamType outerAreaPerVolume = static_cast<ParamType>(_parOuterSurfAreaPerVolume[_disc.nParPointsBeforeType[type]]);
 
 		const ParamType jacCF_val = invBetaC * surfaceToVolumeRatio;
-		const ParamType jacPF_val = -1.0 / epsP; // -outerAreaPerVolume / epsP; @TODO: why?
+		const ParamType jacPF_val = -1.0 / epsP;
 
-		// Discretized film diffusion kf for finite volumes // @TODO: why?
-		//if (cadet_likely(_colParBoundaryOrder == 2))
-		//{
-		//	const ParamType absOuterShellHalfRadius = 0.5 * static_cast<ParamType>(_parCellSize[_disc.nParPointsBeforeType[type]]);
-		//	for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-		//		kf[comp] = 1.0 / (absOuterShellHalfRadius / epsP / static_cast<ParamType>(_poreAccessFactor[type * _disc.nComp + comp]) / static_cast<ParamType>(parDiff[comp]) + 1.0 / static_cast<ParamType>(filmDiff[comp]));
-		//}
-		//else
-		//{
-			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-				kf[comp] = static_cast<ParamType>(filmDiff[comp]);
-		//}
-
-		// J_{0,f} block, adds flux to column void / bulk volume equations
+		// J_{0,f} block, adds flux to column void / bulk volume
 		for (unsigned int i = 0; i < _disc.nPoints * _disc.nComp; ++i)
 		{
 			const unsigned int colNode = i / _disc.nComp;
-			// + 1/Beta_c * (surfaceToVolumeRatio_pj) * d_j * (k_f * [c_l - c_p])
-			resCol[i] += jacCF_val* static_cast<ParamType>(_parTypeVolFrac[type + colNode * _disc.nParType])* yFluxType[i];
+			// + 1/Beta_c * (surfaceToVolumeRatio_{p,j}) * d_j * (k_f * [c_l - c_p])
+			resCol[i] += jacCF_val * static_cast<ParamType>(_parTypeVolFrac[type + colNode * _disc.nParType])* yFluxType[i];
 		}
 
 		// J_{f,0} block, adds bulk volume state c_i to flux equation
@@ -1589,21 +1484,12 @@ int GeneralRateModelDG::residualFlux(double t, unsigned int secIdx, StateType co
 			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
 			{
 				const unsigned int eq = bnd * idxr.strideColNode() + comp * idxr.strideColComp();
-				resFluxType[eq] -= kf[comp] * yCol[eq];
+				resFluxType[eq] -= static_cast<ParamType>(filmDiff[comp]) * yCol[eq];
 			}
 		}
 
-		// this part is computed in residual particle (weak boundary condition)
-		//// J_{p,f} block, implements bead boundary condition in outer bead shell equation
-		//for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
-		//{
-		//	for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-		//	{
-		//		const unsigned int eq = pblk * idxr.strideColNode() + comp * idxr.strideColComp();
-		//		// + (-1 / (eps_p * F_acc)) * (k_f * [c_l - c_p])
-		//		resParType[pblk * idxr.strideParBlock(type) + comp] += jacPF_val / static_cast<ParamType>(_poreAccessFactor[type * _disc.nComp + comp]) * yFluxType[eq];
-		//	}
-		//}
+		// J_{p,f} block, implements bead boundary condition in outer bead shell equation.
+		// Note that this part is computed in residual particle (weak boundary condition).
 
 		// J_{f,p} block, adds outer bead shell state c_{p,i} to flux equation
 		for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
@@ -1611,11 +1497,11 @@ int GeneralRateModelDG::residualFlux(double t, unsigned int secIdx, StateType co
 			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
 			{
 				const unsigned int eq = pblk * idxr.strideColNode() + comp * idxr.strideColComp();
-				resFluxType[eq] += kf[comp] * yParType[comp + pblk * idxr.strideParBlock(type)];
+				resFluxType[eq] += static_cast<ParamType>(filmDiff[comp]) * yParType[comp + pblk * idxr.strideParBlock(type)];
 			}
 		}
 
-		// @TODO: why?
+		// @TODO: Particle boundary special case for SurfaceDiffusion && quasi-stationary binding
 	//	if (cadet_unlikely(_hasSurfaceDiffusion[type] && _binding[type]->hasQuasiStationaryReactions() && (_disc.nParCell[type] > 1)))
 	//	{
 	//		int const* const qsReaction = _binding[type]->reactionQuasiStationarity();
@@ -1686,8 +1572,9 @@ parts::cell::CellParameters GeneralRateModelDG::makeCellResidualParams(unsigned 
 }
 
 /**
- * @brief Assembles off diagonal Jacobian blocks
- * @details Assembles the fixed blocks @f$ J_{0,f}, \dots, J_{N_p,f} @f$ and @f$ J_{f,0}, \dots, J_{f, N_p}. @f$
+ * @brief Assembles film diffusion jacobian blocks
+ * @details Assembles the fixed blocks @f$ J_{0,f}, \dots, J_{N_p,f} @f$ and @f$ J_{f,0}, \dots, J_{f, N_p}. @f$,
+ *			and @f$ J_{0,f}, \dots, J_{N_p,f} @f$ and @f$ J_{f,0}, \dots, J_{f, N_p}. @f$
  *          The blocks are fixed for each section.
  * @param [in] t Current time
  * @param [in] secIdx Index of the current section
@@ -1695,99 +1582,10 @@ parts::cell::CellParameters GeneralRateModelDG::makeCellResidualParams(unsigned 
  */
 void GeneralRateModelDG::assembleOffdiagJac(double t, unsigned int secIdx, double const* vecStateY)
 {
-	// Clear matrices for new assembly
-	_jacCF.clear();
-	_jacFC.clear();
-	for (unsigned int pblk = 0; pblk < _disc.nPoints * _disc.nParType; ++pblk)
-	{
-		_jacPF[pblk].clear();
-		_jacFP[pblk].clear();
-	}
+	
+	calcFluxJacobians(secIdx);
 
-	// Note that the J_f block, which is the identity matrix, is treated in the linear solver
-
-	Indexer idxr(_disc);
-
-	const double invBetaC = 1.0 / static_cast<double>(_colPorosity) - 1.0;
-
-	// Discretized film diffusion kf
-	double* const kf = _discParFlux.create<double>(_disc.nComp);
-
-	for (unsigned int type = 0; type < _disc.nParType; ++type)
-	{
-		const unsigned int typeOffset = type * _disc.nPoints * _disc.nComp;
-		const double epsP = static_cast<double>(_parPorosity[type]);
-
-		// Ordering of diffusion:
-		// sec0type0comp0, sec0type0comp1, sec0type0comp2, sec0type1comp0, sec0type1comp1, sec0type1comp2,
-		// sec1type0comp0, sec1type0comp1, sec1type0comp2, sec1type1comp0, sec1type1comp1, sec1type1comp2, ...
-		active const* const filmDiff = getSectionDependentSlice(_filmDiffusion, _disc.nComp * _disc.nParType, secIdx) + type * _disc.nComp;
-		//@TODO: parDiff not needed ?
-		active const* const parDiff = getSectionDependentSlice(_parDiffusion, _disc.nComp * _disc.nParType, secIdx) + type * _disc.nComp;
-
-		const double surfaceToVolumeRatio = _parGeomSurfToVol[type] / static_cast<double>(_parRadius[type]);
-		const double outerAreaPerVolume = static_cast<double>(_parOuterSurfAreaPerVolume[_disc.nParPointsBeforeType[type]]);
-
-		const double jacCF_val = invBetaC * surfaceToVolumeRatio;
-		const double jacPF_val = -2.0 / (epsP * _disc.deltaR[type]); // -outerAreaPerVolume / epsP; // @TODO: FV specific?
-		//const double jacPF_val = -1.0 / epsP; // -outerAreaPerVolume / epsP; // @TODO: FV specific?
-
-		// Discretized film diffusion kf for finite volumes
-		//if (cadet_likely(_colParBoundaryOrder == 2)) // @TODO: why?
-		//{
-		//	const double absOuterShellHalfRadius = 0.5 * static_cast<double>(_parCellSize[_disc.nParPointsBeforeType[type]]);
-		//	for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-		//		kf[comp] = 1.0 / (absOuterShellHalfRadius / epsP / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]) / static_cast<double>(parDiff[comp]) + 1.0 / static_cast<double>(filmDiff[comp]));
-		//}
-		//else
-		//{
-			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-				kf[comp] = static_cast<double>(filmDiff[comp]);
-		//}
-
-		// J_{0,f} block, adds flux to column void / bulk volume equations
-		for (unsigned int eq = 0; eq < _disc.nPoints * _disc.nComp; ++eq)
-		{
-			const unsigned int colNode = eq / _disc.nComp;
-
-			// Main diagonal corresponds to j_{f,i} (flux) state variable
-			_jacCF.addElement(eq, eq + typeOffset, jacCF_val * static_cast<double>(_parTypeVolFrac[type + colNode * _disc.nParType]));
-		}
-
-		// J_{f,0} block, adds bulk volume state c_i to flux equation
-		for (unsigned int point = 0; point < _disc.nPoints; ++point)
-		{
-			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-			{
-				// Main diagonal corresponds to c_i state variable in each column cell
-				const unsigned int eq = point * idxr.strideColNode() + comp * idxr.strideColComp();
-				_jacFC.addElement(eq + typeOffset, eq, -kf[comp]);
-			}
-		}
-
-		// J_{p,f} block, implements bead boundary condition in outer bead shell equation
-		linalg::DoubleSparseMatrix* const jacPFtype = _jacPF + type * _disc.nPoints;
-		for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
-		{
-			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-			{
-				const unsigned int eq = typeOffset + pblk * idxr.strideColNode() + comp * idxr.strideColComp();
-				jacPFtype[pblk].addElement(comp, eq, jacPF_val * _disc.parInvWeights[type][0] / static_cast<double>(_poreAccessFactor[comp]));
-			}
-		}
-
-		// J_{f,p} block, adds outer bead shell state c_{p,i} to flux equation
-		linalg::DoubleSparseMatrix* const jacFPtype = _jacFP + type * _disc.nPoints;
-		for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
-		{
-			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-			{
-				const unsigned int eq = typeOffset + pblk * idxr.strideColNode() + comp * idxr.strideColComp();
-				jacFPtype[pblk].addElement(eq, comp, kf[comp]);
-			}
-		}
-
-		// @TODO: why?
+		// @TODO: Particle boundary special case for SurfaceDiffusion && quasi-stationary binding
 		//if (cadet_unlikely(_hasSurfaceDiffusion[type] && _binding[type]->hasQuasiStationaryReactions() && (_disc.nParCell[type] > 1)))
 		//{
 		//	int const* const qsReaction = _binding[type]->reactionQuasiStationarity();
@@ -1862,144 +1660,144 @@ void GeneralRateModelDG::assembleOffdiagJac(double t, unsigned int secIdx, doubl
 		//		}
 		//	}
 		//}
-	}
+	//}
 
-	_discParFlux.destroy<double>();
+	//_discParFlux.destroy<double>();
 }
 
-/**
- * @brief Assembles off diagonal Jacobian blocks
- * @details Assembles the fixed blocks @f$ J_{0,f}, \dots, J_{N_p,f} @f$ and @f$ J_{f,0}, \dots, J_{f, N_p}. @f$
- *          The blocks are fixed for each section.
- * @param [in] t Current time
- * @param [in] secIdx Index of the current section
- * @param [in] vecStateY Current state vector
- */
-void GeneralRateModelDG::assembleOffdiagJacFluxParticle(double t, unsigned int secIdx, double const* vecStateY)
-{
-	for (unsigned int pblk = 0; pblk < _disc.nPoints * _disc.nParType; ++pblk)
-		_jacFP[pblk].clear();
-
-	Indexer idxr(_disc);
-
-//	const double invBetaC = 1.0 / static_cast<double>(_colPorosity) - 1.0;
-
-	// Discretized film diffusion kf for finite volumes
-	double* const kf = _discParFlux.create<double>(_disc.nComp);
-
-	for (unsigned int type = 0; type < _disc.nParType; ++type)
-	{
-		const unsigned int typeOffset = type * _disc.nPoints * _disc.nComp;
-		const double epsP = static_cast<double>(_parPorosity[type]);
-
-		// Ordering of diffusion:
-		// sec0type0comp0, sec0type0comp1, sec0type0comp2, sec0type1comp0, sec0type1comp1, sec0type1comp2,
-		// sec1type0comp0, sec1type0comp1, sec1type0comp2, sec1type1comp0, sec1type1comp1, sec1type1comp2, ...
-		active const* const filmDiff = getSectionDependentSlice(_filmDiffusion, _disc.nComp * _disc.nParType, secIdx) + type * _disc.nComp;
-		active const* const parDiff = getSectionDependentSlice(_parDiffusion, _disc.nComp * _disc.nParType, secIdx) + type * _disc.nComp;
-
-		//// Discretized film diffusion kf for finite volumes
-		//if (cadet_likely(_colParBoundaryOrder == 2)) // @TODO: why, FV specific?
-		//{
-		//	const double absOuterShellHalfRadius = 0.5 * static_cast<double>(_parCellSize[_disc.nParPointsBeforeType[type]]);
-		//	for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-		//		kf_FV[comp] = 1.0 / (absOuterShellHalfRadius / epsP / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]) / static_cast<double>(parDiff[comp]) + 1.0 / static_cast<double>(filmDiff[comp]));
-		//}
-		//else
-		//{
-			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-				kf[comp] = static_cast<double>(filmDiff[comp]);
-		//}
-
-		// J_{f,p} block, adds outer bead shell state c_{p,i} to flux equation
-		linalg::DoubleSparseMatrix* const jacFPtype = _jacFP + type * _disc.nPoints;
-		for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
-		{
-			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-			{
-				const unsigned int eq = typeOffset + pblk * idxr.strideColNode() + comp * idxr.strideColComp();
-				jacFPtype[pblk].addElement(eq, comp, kf[comp]);
-			}
-		}
-
-		//if (_hasSurfaceDiffusion[type] && _binding[type]->hasQuasiStationaryReactions() && (_disc.nParCell[type] > 1))
-		//{
-		//	int const* const qsReaction = _binding[type]->reactionQuasiStationarity();
-
-		//	// Ordering of particle surface diffusion:
-		//	// bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2
-		//	active const* const parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[type];
-		//	//active const* const parCenterRadius = _parCenterRadius.data() + _disc.nParPointsBeforeType[type]; // @TODO: FV specific?
-		//	//const double absOuterShellHalfRadius = 0.5 * static_cast<double>(_parCellSize[_disc.nParPointsBeforeType[type]]); // @TODO: FV specific?
-
-		//	for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-		//		kf[comp] = (1.0 - static_cast<double>(_parPorosity[type])) / (1.0 + epsP * static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]) * static_cast<double>(parDiff[comp]) / (absOuterShellHalfRadius * static_cast<double>(filmDiff[comp])));
-
-		//	for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
-		//	{
-		//		const ColumnPosition colPos{ _disc.deltaZ * std::floor(pblk / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes]), 0.0, static_cast<double>(parCenterRadius[0]) / static_cast<double>(_parRadius[type])};
-		//		const double dr = static_cast<double>(parCenterRadius[0]) - static_cast<double>(parCenterRadius[1]);
-
-		//		double const* const yCell = vecStateY + idxr.offsetCp(ParticleTypeIndex{type}, ParticleIndex{pblk});
-
-		//		for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-		//		{
-		//			const unsigned int eq = typeOffset + pblk * idxr.strideColNode() + comp * idxr.strideColComp();
-		//			const unsigned int nBound = _disc.nBound[_disc.nComp * type + comp];
-
-		//			for (unsigned int i = 0; i < nBound; ++i)
-		//			{
-		//				const int idxBnd = idxr.offsetBoundComp(ParticleTypeIndex{type}, ComponentIndex{comp}) + i;
-
-		//				// Skip quasi-stationary bound states
-		//				if (!qsReaction[idxBnd])
-		//					continue;
-
-		//				if (_parDepSurfDiffusion[type])
-		//				{
-		//					const double localSurfDiff = _parDepSurfDiffusion[type]->combinedParameterSolid(
-		//						colPos,
-		//						static_cast<double>(parSurfDiff[idxBnd]),
-		//						yCell,
-		//						yCell + idxr.strideParLiquid(),
-		//						idxBnd
-		//					);
-
-		//					const double v = kf[comp] * localSurfDiff / dr;
-		//					const int curIdx = idxr.strideParLiquid() + idxBnd;
-
-		//					jacFPtype[pblk].addElement(eq, curIdx, -v);
-		//					jacFPtype[pblk].addElement(eq, curIdx + idxr.strideParShell(type), v);
-
-		//					const double gradQ = (yCell[curIdx] - yCell[curIdx + idxr.strideParShell(type)]) / dr;
-		//					_parDepSurfDiffusion[type]->analyticJacobianCombinedAddSolid(
-		//						colPos,
-		//						static_cast<double>(parSurfDiff[idxBnd]),
-		//						yCell,
-		//						yCell + idxr.strideParLiquid(),
-		//						idxBnd,
-		//						-kf[comp] * gradQ,
-		//						0,
-		//						eq,
-		//						jacFPtype[pblk]
-		//					);
-		//				}
-		//				else
-		//				{
-		//					const double v = kf[comp] * static_cast<double>(parSurfDiff[idxBnd]) / dr;
-		//					const int curIdx = idxr.strideParLiquid() + idxBnd;
-
-		//					jacFPtype[pblk].addElement(eq, curIdx, -v);
-		//					jacFPtype[pblk].addElement(eq, curIdx + idxr.strideParShell(type), v);
-		//				}
-		//			}
-		//		}
-		//	}
-		//}
-	}
-
-	_discParFlux.destroy<double>();
-}
+///**
+// * @brief Assembles off diagonal Jacobian blocks
+// * @details Assembles the fixed blocks @f$ J_{0,f}, \dots, J_{N_p,f} @f$ and @f$ J_{f,0}, \dots, J_{f, N_p}. @f$
+// *          The blocks are fixed for each section.
+// * @param [in] t Current time
+// * @param [in] secIdx Index of the current section
+// * @param [in] vecStateY Current state vector
+// */
+//void GeneralRateModelDG::assembleOffdiagJacFluxParticle(double t, unsigned int secIdx, double const* vecStateY)
+//{
+//	for (unsigned int pblk = 0; pblk < _disc.nPoints * _disc.nParType; ++pblk)
+//		_jacFP[pblk].clear();
+//
+//	Indexer idxr(_disc);
+//
+////	const double invBetaC = 1.0 / static_cast<double>(_colPorosity) - 1.0;
+//
+//	// Discretized film diffusion kf for finite volumes
+//	double* const kf = _discParFlux.create<double>(_disc.nComp);
+//
+//	for (unsigned int type = 0; type < _disc.nParType; ++type)
+//	{
+//		const unsigned int typeOffset = type * _disc.nPoints * _disc.nComp;
+//		const double epsP = static_cast<double>(_parPorosity[type]);
+//
+//		// Ordering of diffusion:
+//		// sec0type0comp0, sec0type0comp1, sec0type0comp2, sec0type1comp0, sec0type1comp1, sec0type1comp2,
+//		// sec1type0comp0, sec1type0comp1, sec1type0comp2, sec1type1comp0, sec1type1comp1, sec1type1comp2, ...
+//		active const* const filmDiff = getSectionDependentSlice(_filmDiffusion, _disc.nComp * _disc.nParType, secIdx) + type * _disc.nComp;
+//		active const* const parDiff = getSectionDependentSlice(_parDiffusion, _disc.nComp * _disc.nParType, secIdx) + type * _disc.nComp;
+//
+//		//// Discretized film diffusion kf for finite volumes
+//		//if (cadet_likely(_colParBoundaryOrder == 2)) // @TODO: why, FV specific?
+//		//{
+//		//	const double absOuterShellHalfRadius = 0.5 * static_cast<double>(_parCellSize[_disc.nParPointsBeforeType[type]]);
+//		//	for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
+//		//		kf_FV[comp] = 1.0 / (absOuterShellHalfRadius / epsP / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]) / static_cast<double>(parDiff[comp]) + 1.0 / static_cast<double>(filmDiff[comp]));
+//		//}
+//		//else
+//		//{
+//			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
+//				kf[comp] = static_cast<double>(filmDiff[comp]);
+//		//}
+//
+//		// J_{f,p} block, adds outer bead shell state c_{p,i} to flux equation
+//		linalg::DoubleSparseMatrix* const jacFPtype = _jacFP + type * _disc.nPoints;
+//		for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
+//		{
+//			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
+//			{
+//				const unsigned int eq = typeOffset + pblk * idxr.strideColNode() + comp * idxr.strideColComp();
+//				jacFPtype[pblk].addElement(eq, comp, kf[comp]);
+//			}
+//		}
+//
+//		//if (_hasSurfaceDiffusion[type] && _binding[type]->hasQuasiStationaryReactions() && (_disc.nParCell[type] > 1))
+//		//{
+//		//	int const* const qsReaction = _binding[type]->reactionQuasiStationarity();
+//
+//		//	// Ordering of particle surface diffusion:
+//		//	// bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2
+//		//	active const* const parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[type];
+//		//	//active const* const parCenterRadius = _parCenterRadius.data() + _disc.nParPointsBeforeType[type]; // @TODO: FV specific?
+//		//	//const double absOuterShellHalfRadius = 0.5 * static_cast<double>(_parCellSize[_disc.nParPointsBeforeType[type]]); // @TODO: FV specific?
+//
+//		//	for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
+//		//		kf[comp] = (1.0 - static_cast<double>(_parPorosity[type])) / (1.0 + epsP * static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]) * static_cast<double>(parDiff[comp]) / (absOuterShellHalfRadius * static_cast<double>(filmDiff[comp])));
+//
+//		//	for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
+//		//	{
+//		//		const ColumnPosition colPos{ _disc.deltaZ * std::floor(pblk / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes]), 0.0, static_cast<double>(parCenterRadius[0]) / static_cast<double>(_parRadius[type])};
+//		//		const double dr = static_cast<double>(parCenterRadius[0]) - static_cast<double>(parCenterRadius[1]);
+//
+//		//		double const* const yCell = vecStateY + idxr.offsetCp(ParticleTypeIndex{type}, ParticleIndex{pblk});
+//
+//		//		for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
+//		//		{
+//		//			const unsigned int eq = typeOffset + pblk * idxr.strideColNode() + comp * idxr.strideColComp();
+//		//			const unsigned int nBound = _disc.nBound[_disc.nComp * type + comp];
+//
+//		//			for (unsigned int i = 0; i < nBound; ++i)
+//		//			{
+//		//				const int idxBnd = idxr.offsetBoundComp(ParticleTypeIndex{type}, ComponentIndex{comp}) + i;
+//
+//		//				// Skip quasi-stationary bound states
+//		//				if (!qsReaction[idxBnd])
+//		//					continue;
+//
+//		//				if (_parDepSurfDiffusion[type])
+//		//				{
+//		//					const double localSurfDiff = _parDepSurfDiffusion[type]->combinedParameterSolid(
+//		//						colPos,
+//		//						static_cast<double>(parSurfDiff[idxBnd]),
+//		//						yCell,
+//		//						yCell + idxr.strideParLiquid(),
+//		//						idxBnd
+//		//					);
+//
+//		//					const double v = kf[comp] * localSurfDiff / dr;
+//		//					const int curIdx = idxr.strideParLiquid() + idxBnd;
+//
+//		//					jacFPtype[pblk].addElement(eq, curIdx, -v);
+//		//					jacFPtype[pblk].addElement(eq, curIdx + idxr.strideParShell(type), v);
+//
+//		//					const double gradQ = (yCell[curIdx] - yCell[curIdx + idxr.strideParShell(type)]) / dr;
+//		//					_parDepSurfDiffusion[type]->analyticJacobianCombinedAddSolid(
+//		//						colPos,
+//		//						static_cast<double>(parSurfDiff[idxBnd]),
+//		//						yCell,
+//		//						yCell + idxr.strideParLiquid(),
+//		//						idxBnd,
+//		//						-kf[comp] * gradQ,
+//		//						0,
+//		//						eq,
+//		//						jacFPtype[pblk]
+//		//					);
+//		//				}
+//		//				else
+//		//				{
+//		//					const double v = kf[comp] * static_cast<double>(parSurfDiff[idxBnd]) / dr;
+//		//					const int curIdx = idxr.strideParLiquid() + idxBnd;
+//
+//		//					jacFPtype[pblk].addElement(eq, curIdx, -v);
+//		//					jacFPtype[pblk].addElement(eq, curIdx + idxr.strideParShell(type), v);
+//		//				}
+//		//			}
+//		//		}
+//		//	}
+//		//}
+//	}
+//
+//	_discParFlux.destroy<double>();
+//}
 
 int GeneralRateModelDG::residualSensFwdWithJacobian(const SimulationTime& simTime, const ConstSimulationState& simState, const AdJacobianParams& adJac, util::ThreadLocalStorage& threadLocalMem)
 {
@@ -2449,6 +2247,40 @@ void GeneralRateModelDG::updateRadialDisc()
 			throw InvalidParameterException("User defined particle discretization (cell distribution) not implemented yet for DG. Choose Equidistant!");
 			//setUserdefinedRadialDisc(i);
 	}
+
+	/*		metrics		*/
+	// estimate cell dependent D_r
+
+	for (int parType = 0; parType < _disc.nParType; parType++) {
+
+		for (int cell = 0; cell < _disc.nParCell[parType]; cell++) {
+
+			_disc.Ir[_disc.aux[parType] + cell] = VectorXd::Zero(_disc.nParNode[parType]);
+
+			for (int node = 0; node < _disc.nParNode[parType]; node++) {
+				_disc.Ir[_disc.aux[parType] + cell][node] = _disc.deltaR[parType] / 2.0 * (_disc.parNodes[parType][node] + 1.0);
+			}
+
+			_disc.Dr[_disc.aux[parType] + cell].resize(_disc.nParNode[parType], _disc.nParNode[parType]);
+			_disc.Dr[_disc.aux[parType] + cell].setZero();
+
+			double r_L = static_cast<double>(_parCoreRadius[parType]) + cell * _disc.deltaR[parType]; // left boundary of current cell
+
+			_disc.Ir[_disc.aux[parType] + cell] = _disc.Ir[_disc.aux[parType] + cell] + VectorXd::Ones(_disc.nParNode[parType]) * r_L;
+
+			if (_parGeomSurfToVol[parType] == SurfVolRatioSphere)
+				_disc.Ir[_disc.aux[parType] + cell].cwiseAbs2();
+			else if (_parGeomSurfToVol[parType] == SurfVolRatioSlab)
+				_disc.Ir[_disc.aux[parType] + cell] = VectorXd::Ones(_disc.nParNode[parType]);
+
+			// (D_r)_{i, j} = D_{i, j} * (r_j / r_i)
+			_disc.Dr[_disc.aux[parType] + cell] = _disc.parPolyDerM[parType];
+			_disc.Dr[_disc.aux[parType] + cell].array().rowwise() *= _disc.Ir[_disc.aux[parType] + cell].array().transpose();
+			_disc.Dr[_disc.aux[parType] + cell].array().colwise() *= _disc.Ir[_disc.aux[parType] + cell].array().cwiseInverse();
+
+		}
+	}
+
 }
 
 bool GeneralRateModelDG::setParameter(const ParameterId& pId, double value)
