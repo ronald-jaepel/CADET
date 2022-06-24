@@ -615,19 +615,6 @@ int GeneralRateModelDG::linearSolve(double t, double alpha, double outerTol, dou
 		// Assemble and factorize discretized bulk Jacobian
 		assembleDiscretizedGlobalJacobian(alpha, idxr);
 
-		//_globalJacDisc.coeffRef(0, 0) = 1.0; // todo... delete
-		//for (int i = 0; i < _jacInlet.rows(); i++) {
-		//	for (int j = 0; j < _jacInlet.cols(); j++) {
-		//		_globalJacDisc.coeffRef(i, j) = _jacInlet(i, j);
-		//	}
-		//}
-		//if (!_globalJacDisc.isCompressed()) {
-		//	_globalJacDisc.makeCompressed();
-		//}
-
-		//std::cout << "jacobian:\n" << std::setprecision(5) << _globalJacDisc.block(idxr.offsetC(), idxr.offsetC(), numPureDofs(), numPureDofs()).toDense() << std::endl;//todo
-
-		//_globalSolver.analyzePattern(_globalJacDisc.block(_disc.nComp, _disc.nComp, numPureDofs(), numPureDofs())); // todo: delete
 		_globalSolver.factorize(_globalJacDisc.block(idxr.offsetC(), idxr.offsetC(), numPureDofs(), numPureDofs()));
 
 		if (cadet_unlikely(_globalSolver.info() != Eigen::Success))
@@ -641,7 +628,7 @@ int GeneralRateModelDG::linearSolve(double t, double alpha, double outerTol, dou
 
 	// ==== Step 1.5: Solve J c_uo = b_uo - A * c_in = b_uo - A*b_in
 
-	// handle inlet DOFs // TODO!
+	// handle inlet DOFs
 	for (int comp = 0; comp < _disc.nComp; comp++) {
 		for (int node = 0; node < (_disc.exactInt ? _disc.nNodes : 1); node++) {
 			r[idxr.offsetC() + comp * idxr.strideColComp() + node * idxr.strideColNode()] += _jacInlet(node, 0) * r[comp];
@@ -651,10 +638,7 @@ int GeneralRateModelDG::linearSolve(double t, double alpha, double outerTol, dou
 	// ==== Step 2: Solve system of pure DOFs
 	// The result is stored in rhs (in-place solution)
 
-	//std::cout << "rBefore:\n" << r.segment(idxr.offsetC(), numPureDofs()) << std::endl;//todo
 	r.segment(idxr.offsetC(), numPureDofs()) = _globalSolver.solve(r.segment(idxr.offsetC(), numPureDofs()));
-	//r.segment(idxr.offsetC(), numPureDofs()) = _globalJacDisc.block(idxr.offsetC(), idxr.offsetC(), numPureDofs(), numPureDofs()).toDense().colPivHouseholderQr().solve(r.segment(idxr.offsetC(), numPureDofs()));
-	//std::cout << "rSol:\n" << r.segment(idxr.offsetC(), numPureDofs()) << std::endl;//todo
 
 	if (cadet_unlikely(_globalSolver.info() != Eigen::Success))
 	{
@@ -681,13 +665,6 @@ int GeneralRateModelDG::linearSolve(double t, double alpha, double outerTol, dou
  * @param [in] alpha Value of \f$ \alpha \f$ (arises from BDF time discretization)
  */
 void GeneralRateModelDG::assembleDiscretizedGlobalJacobian(double alpha, Indexer idxr) {
-
-	// //reset jacobian
-	//double* vPtr = _globalJacDisc.valuePtr();
-	//for (int k = 0; k < _globalJacDisc.nonZeros(); k++) {
-	//	*vPtr = 0.0;
-	//	vPtr++;
-	//}
 
 	/* add static (per section) jacobian without inlet */
 	_globalJacDisc = _globalJac;
@@ -720,7 +697,7 @@ void GeneralRateModelDG::assembleDiscretizedGlobalJacobian(double alpha, Indexer
 
 			// compute time derivative of remaining points (all but the inner boundary one)
 			// Iterator jac has already been advanced to next shell
-			for (unsigned int j = 1; j < _disc.nParNode[parType]; ++j)
+			for (unsigned int j = 1; j < _disc.nParPoints[parType]; ++j)
 			{
 				addTimeDerivativeToJacobianParticleShell(jac, idxr, alpha, parType);
 				// Iterator jac has already been advanced to next shell
