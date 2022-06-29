@@ -401,12 +401,12 @@ protected:
 
 			// compute DG operators for bulk and every particle
 			lglNodesWeights(polyDeg, nodes, invWeights);
-			invMMatrix(nNodes, nodes);
+			invMM = invMMatrix(nNodes, nodes);
 			derivativeMatrix(polyDeg, polyDerM, nodes);
 
 			for (int parType = 0; parType < nParType; parType++) {
 				lglNodesWeights(parPolyDeg[parType], parNodes[parType], parInvWeights[parType]);
-				invMMatrix(nParNode[parType], parNodes[parType]);
+				parInvMM[parType] = invMMatrix(nParNode[parType], parNodes[parType]);
 				derivativeMatrix(parPolyDeg[parType], parPolyDerM[parType], parNodes[parType]);
 			}
 		}
@@ -584,8 +584,8 @@ protected:
 		* @brief calculates mass matrix for exact polynomial integration
 		* @detail exact polynomial integration leads to a full mass matrix
 		*/
-		void invMMatrix(const int _nnodes, const Eigen::VectorXd _nodes) {
-			invMM = (getVandermonde_LEGENDRE(_nnodes, _nodes) * (getVandermonde_LEGENDRE(_nnodes, _nodes).transpose()));
+		MatrixXd invMMatrix(const int _nnodes, const Eigen::VectorXd _nodes) {
+			return (getVandermonde_LEGENDRE(_nnodes, _nodes) * (getVandermonde_LEGENDRE(_nnodes, _nodes).transpose()));
 		}
 
 	};
@@ -621,6 +621,7 @@ protected:
 
 	Eigen::SparseMatrix<double, RowMajor> _globalJac; //!< static part of global Jacobian
 	Eigen::SparseMatrix<double, RowMajor> _globalJacDisc; //!< global Jacobian with time derivative from BDF method
+	MatrixXd FDJac; // todo delete
 
 	Eigen::MatrixXd _jacInlet; //!< Jacobian inlet DOF block matrix connects inlet DOFs to first bulk cells
 
@@ -1387,7 +1388,7 @@ protected:
 		int sNode = idxr.strideColNode();
 		int sCell = idxr.strideColCell();
 		int sComp = idxr.strideColComp();
-		int offC = 0; // inlet DOFs not included in Jacobian
+		int offC = idxr.offsetC(); // global jacobian
 
 		unsigned int nNodes = _disc.nNodes;
 		unsigned int nCells = _disc.nCol;
@@ -1717,6 +1718,10 @@ protected:
 		}
 	}
 
+	/*
+	 *@brief adds the time derivative entries from particle equations
+	 *@detail since the main diagonal entries are already set, we actually only set the solid phase time derivative entries for the discretized particle mass balance equations
+	 */
 	void parTimeDerJacPattern_GRM(std::vector<T>& tripletList, unsigned int parType, unsigned int colNode) {
 
 		Indexer idxr(_disc);
@@ -1724,12 +1729,18 @@ protected:
 		unsigned int offset = idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
 
 		for (unsigned int parNode = 0; parNode < _disc.nParPoints[parType]; parNode++) {
+
+			// todo cant call _parCoreRadius here somehow?
+			//if (parNode == 0u && _parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab && _parCoreRadius[parType] == 0.0)
+			//	continue; // discretization special case: we get an algebraic equation at inner particle boundary
+
 			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+
 				for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
 					// row: jump over previous nodes add current component offset
 					// col: jump over previous nodes, liquid phase and previous bound states
 					tripletList.push_back(T(offset + parNode * idxr.strideParShell(parType) + comp,
-						offset + parNode * idxr.strideParShell(parType) + idxr.strideParLiquid() + comp + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd, 0.0));
+						offset + parNode * idxr.strideParShell(parType) + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd, 0.0));
 				}
 			}
 		}
